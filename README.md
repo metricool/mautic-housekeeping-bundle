@@ -1,5 +1,7 @@
 # Housekeeping by Leuchtfeuer
 
+This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--lead-object` and the `housekeeping_skip_email_stats_tokens` setting.
+
 ## Overview / Purpose / Features
 This plugin provides a Mautic Housekeeping Command for database cleanup purposes.
 
