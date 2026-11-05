@@ -70,6 +70,7 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $this->fixtureHelper->createPageHit($contact, $oldDate);
         $recentHit   = $this->fixtureHelper->createPageHit($contact, $this->fixtureHelper->daysAgo(10));
         $laterOldHit = $this->fixtureHelper->createPageHit($contact, $oldDate);
+        $lastHit     = $this->fixtureHelper->createPageHit($contact, $this->fixtureHelper->daysAgo(5));
 
         $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
             '--days-old'   => 30,
@@ -80,11 +81,12 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $this->em->clear();
 
         $hits = $this->em->getRepository(Hit::class)->findBy(['lead' => $contact->getId()]);
-        $this->assertCount(2, $hits);
+        $this->assertCount(3, $hits);
 
         $hitIds = array_map(static fn (Hit $hit): int => (int) $hit->getId(), $hits);
         $this->assertContains((int) $recentHit->getId(), $hitIds);
         $this->assertContains((int) $laterOldHit->getId(), $hitIds);
+        $this->assertContains((int) $lastHit->getId(), $hitIds);
 
         $this->assertStringContainsString('1 page_hits', $commandTester->getDisplay());
         $this->assertSame(0, $commandTester->getStatusCode());

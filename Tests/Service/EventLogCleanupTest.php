@@ -445,8 +445,8 @@ final class EventLogCleanupTest extends TestCase
     /**
      * @dataProvider batchProvider
      *
-     * @param non-empty-array<string, bool>                                                                             $operations
-     * @param list<array{0: string, 1: array<string, int|list<int>>, 2: array<string, int>, 3: list<string>|int|false}> $calls
+     * @param non-empty-array<string, bool>                                                                            $operations
+     * @param list<array{0: string, 1: array<string, int|list<int>>, 2: array<string, int>, 3: list<string|null>|int}> $calls
      */
     public function testBatchSizeProcessesRowsInBatches(array $operations, array $calls, string $message): void
     {
@@ -465,11 +465,14 @@ final class EventLogCleanupTest extends TestCase
                 self::assertSame($call[2], $types);
 
                 $result = $this->createMock(Result::class);
-                if (is_array($call[3])) {
-                    $result->method('fetchFirstColumn')
+                if (str_contains($call[0], 'MIN(id)')) {
+                    $result->method('fetchNumeric')
                         ->willReturn($call[3]);
-                } elseif (str_contains($call[0], 'FORCE INDEX (PRIMARY)')) {
+                } elseif (str_contains($call[0], ':probeId')) {
                     $result->method('fetchOne')
+                        ->willReturn($call[3]);
+                } elseif (is_array($call[3])) {
+                    $result->method('fetchFirstColumn')
                         ->willReturn($call[3]);
                 } else {
                     $result->method('rowCount')
@@ -487,29 +490,44 @@ final class EventLogCleanupTest extends TestCase
 
     public static function batchProvider(): \Generator
     {
-        $boundParams = ['daysOld' => 4];
-        $boundTypes  = ['daysOld' => \PDO::PARAM_INT];
+        $probeTypes  = ['daysOld' => \PDO::PARAM_INT, 'probeId' => \PDO::PARAM_INT];
         $selectTypes = ['daysOld' => \PDO::PARAM_INT, 'lastId' => \PDO::PARAM_INT];
         $writeTypes  = ['daysOld' => \PDO::PARAM_INT, 'batchIds' => ArrayParameterType::INTEGER];
+        $noRows      = [null, null];
 
-        $boundHits  = 'SELECT id FROM prefix_table_page_hits FORCE INDEX (PRIMARY) WHERE date_hit >= DATE_SUB(NOW(),INTERVAL :daysOld DAY) ORDER BY id LIMIT 1';
-        $selectHits = 'SELECT prefix_table_page_hits.id FROM prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_page_hits.id > :lastId ORDER BY prefix_table_page_hits.id LIMIT 2';
+        $rangeHits  = 'SELECT MIN(id), MAX(id) FROM prefix_table_page_hits';
+        $probeHits  = 'SELECT date_hit >= DATE_SUB(NOW(),INTERVAL :daysOld DAY) FROM prefix_table_page_hits WHERE id >= :probeId ORDER BY id LIMIT 1';
+        $selectHits ='SELECT prefix_table_page_hits.id FROM prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_page_hits.id > :lastId ORDER BY prefix_table_page_hits.id LIMIT 2';
         $deleteHits = 'DELETE LOW_PRIORITY prefix_table_page_hits FROM prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_page_hits.id IN (:batchIds)';
 
-        yield 'stops selecting at the first newer row' => [
+        yield 'searches for where the newer rows begin and stops selecting there' => [
             [EventLogCleanup::PAGE_HITS => true],
             [
-                [$boundHits, $boundParams, $boundTypes, '99'],
-                ['SELECT prefix_table_page_hits.id FROM prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_page_hits.id > :lastId AND prefix_table_page_hits.id < 99 ORDER BY prefix_table_page_hits.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10']],
-                [$deleteHits, ['daysOld' => 4, 'batchIds' => [10]], $writeTypes, 1],
+                [$rangeHits, [], [], ['1', '8']],
+                [$probeHits, ['daysOld' => 4, 'probeId' => 8], $probeTypes, 1],
+                [$probeHits, ['daysOld' => 4, 'probeId' => 4], $probeTypes, 0],
+                [$probeHits, ['daysOld' => 4, 'probeId' => 6], $probeTypes, 1],
+                [$probeHits, ['daysOld' => 4, 'probeId' => 5], $probeTypes, 0],
+                ['SELECT prefix_table_page_hits.id FROM prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_page_hits.id > :lastId AND prefix_table_page_hits.id < 6 ORDER BY prefix_table_page_hits.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['3']],
+                [$deleteHits, ['daysOld' => 4, 'batchIds' => [3]], $writeTypes, 1],
             ],
             '1 page_hits rows have been deleted.',
+        ];
+
+        yield 'adds no bound when no row is newer than the cutoff' => [
+            [EventLogCleanup::PAGE_HITS => true],
+            [
+                [$rangeHits, [], [], ['1', '8']],
+                [$probeHits, ['daysOld' => 4, 'probeId' => 8], $probeTypes, 0],
+                [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, []],
+            ],
+            '0 page_hits rows have been deleted.',
         ];
 
         yield 'stops on a short batch and moves past the last id' => [
             [EventLogCleanup::PAGE_HITS => true],
             [
-                [$boundHits, $boundParams, $boundTypes, false],
+                [$rangeHits, [], [], $noRows],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
                 [$deleteHits, ['daysOld' => 4, 'batchIds' => [10, 20]], $writeTypes, 2],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 20], $selectTypes, ['30']],
@@ -521,7 +539,7 @@ final class EventLogCleanupTest extends TestCase
         yield 'stops on an empty batch' => [
             [EventLogCleanup::PAGE_HITS => true],
             [
-                [$boundHits, $boundParams, $boundTypes, false],
+                [$rangeHits, [], [], $noRows],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
                 [$deleteHits, ['daysOld' => 4, 'batchIds' => [10, 20]], $writeTypes, 2],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 20], $selectTypes, []],
@@ -532,7 +550,7 @@ final class EventLogCleanupTest extends TestCase
         yield 'counts only the rows that still match when written' => [
             [EventLogCleanup::PAGE_HITS => true],
             [
-                [$boundHits, $boundParams, $boundTypes, false],
+                [$rangeHits, [], [], $noRows],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
                 [$deleteHits, ['daysOld' => 4, 'batchIds' => [10, 20]], $writeTypes, 1],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 20], $selectTypes, []],
@@ -543,7 +561,7 @@ final class EventLogCleanupTest extends TestCase
         yield 'writes nothing when no row matches' => [
             [EventLogCleanup::PAGE_HITS => true],
             [
-                [$boundHits, $boundParams, $boundTypes, false],
+                [$rangeHits, [], [], $noRows],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, []],
             ],
             '0 page_hits rows have been deleted.',
@@ -552,7 +570,7 @@ final class EventLogCleanupTest extends TestCase
         yield 'updates tokens by id' => [
             [EventLogCleanup::EMAIL_STATS_TOKENS => true],
             [
-                ['SELECT id FROM prefix_table_email_stats FORCE INDEX (PRIMARY) WHERE date_sent >= DATE_SUB(NOW(),INTERVAL :daysOld DAY) ORDER BY id LIMIT 1', $boundParams, $boundTypes, false],
+                ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats', [], [], $noRows],
                 ['SELECT prefix_table_email_stats.id FROM prefix_table_email_stats  WHERE date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND tokens IS NOT NULL AND prefix_table_email_stats.id > :lastId ORDER BY prefix_table_email_stats.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['7']],
                 ['UPDATE LOW_PRIORITY prefix_table_email_stats SET tokens = NULL WHERE date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND tokens IS NOT NULL AND prefix_table_email_stats.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [7]], $writeTypes, 1],
             ],
@@ -562,9 +580,9 @@ final class EventLogCleanupTest extends TestCase
         yield 'qualifies the id on the email_stats join and clears devices first' => [
             [EventLogCleanup::EMAIL_STATS => true],
             [
-                ['SELECT id FROM prefix_table_email_stats_devices FORCE INDEX (PRIMARY) WHERE date_opened >= DATE_SUB(NOW(),INTERVAL :daysOld DAY) ORDER BY id LIMIT 1', $boundParams, $boundTypes, false],
+                ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats_devices', [], [], $noRows],
                 ['SELECT prefix_table_email_stats_devices.id FROM prefix_table_email_stats_devices WHERE prefix_table_email_stats_devices.date_opened < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats_devices.id > :lastId ORDER BY prefix_table_email_stats_devices.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, []],
-                ['SELECT id FROM prefix_table_email_stats FORCE INDEX (PRIMARY) WHERE date_sent >= DATE_SUB(NOW(),INTERVAL :daysOld DAY) ORDER BY id LIMIT 1', $boundParams, $boundTypes, false],
+                ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats', [], [], $noRows],
                 ['SELECT prefix_table_email_stats.id FROM prefix_table_email_stats LEFT JOIN prefix_table_emails ON prefix_table_email_stats.email_id = prefix_table_emails.id WHERE (prefix_table_emails.is_published = 0 OR prefix_table_emails.publish_down < DATE_SUB(NOW(),INTERVAL :daysOld DAY) OR prefix_table_email_stats.email_id IS NULL) AND prefix_table_email_stats.date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats.id > :lastId ORDER BY prefix_table_email_stats.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['5']],
                 ['DELETE LOW_PRIORITY prefix_table_email_stats FROM prefix_table_email_stats LEFT JOIN prefix_table_emails ON prefix_table_email_stats.email_id = prefix_table_emails.id WHERE (prefix_table_emails.is_published = 0 OR prefix_table_emails.publish_down < DATE_SUB(NOW(),INTERVAL :daysOld DAY) OR prefix_table_email_stats.email_id IS NULL) AND prefix_table_email_stats.date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [5]], $writeTypes, 1],
             ],
