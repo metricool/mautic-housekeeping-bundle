@@ -445,7 +445,7 @@ final class EventLogCleanupTest extends TestCase
     /**
      * @dataProvider batchProvider
      *
-     * @param non-empty-array<string, bool>                                                                       $operations
+     * @param non-empty-array<string, bool>                                                                             $operations
      * @param list<array{0: string, 1: array<string, int|list<int>>, 2: array<string, int>, 3: list<string>|int|false}> $calls
      */
     public function testBatchSizeProcessesRowsInBatches(array $operations, array $calls, string $message): void
