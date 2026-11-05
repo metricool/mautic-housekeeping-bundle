@@ -448,7 +448,7 @@ final class EventLogCleanupTest extends TestCase
      * @param non-empty-array<string, bool>                                                                            $operations
      * @param list<array{0: string, 1: array<string, int|list<int>>, 2: array<string, int>, 3: list<string|null>|int}> $calls
      */
-    public function testBatchSizeProcessesRowsInBatches(array $operations, array $calls, string $message): void
+    public function testBatchSizeProcessesRowsInBatches(array $operations, array $calls, string $message, ?int $maxRows = null): void
     {
         $connection = $this->createMock(Connection::class);
         $connection->expects($this->never())
@@ -484,7 +484,7 @@ final class EventLogCleanupTest extends TestCase
 
         $this->assertSame(
             $message,
-            $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, $operations, $this->createStub(OutputInterface::class), null, 2)
+            $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, $operations, $this->createStub(OutputInterface::class), null, 2, $maxRows)
         );
     }
 
@@ -591,6 +591,82 @@ final class EventLogCleanupTest extends TestCase
             ],
             '0 email_stats_devices and 1 email_stats rows have been deleted.',
         ];
+
+        $selectHitsUpToOne = 'SELECT prefix_table_page_hits.id FROM prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_page_hits.id > :lastId ORDER BY prefix_table_page_hits.id LIMIT 1';
+        $limitReached      = ' Stopped at the limit of %d rows for this run. Any rows left wait for the next run.';
+
+        yield 'selects no more rows than the limit has left' => [
+            [EventLogCleanup::PAGE_HITS => true],
+            [
+                [$rangeHits, [], [], $noRows],
+                [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
+                [$deleteHits, ['daysOld' => 4, 'batchIds' => [10, 20]], $writeTypes, 2],
+                [$selectHitsUpToOne, ['daysOld' => 4, 'lastId' => 20], $selectTypes, ['30']],
+                [$deleteHits, ['daysOld' => 4, 'batchIds' => [30]], $writeTypes, 1],
+            ],
+            '3 page_hits rows have been deleted.'.sprintf($limitReached, 3),
+            3,
+        ];
+
+        yield 'counts against the limit only the rows it writes' => [
+            [EventLogCleanup::PAGE_HITS => true],
+            [
+                [$rangeHits, [], [], $noRows],
+                [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
+                [$deleteHits, ['daysOld' => 4, 'batchIds' => [10, 20]], $writeTypes, 1],
+                [$selectHitsUpToOne, ['daysOld' => 4, 'lastId' => 20], $selectTypes, ['30']],
+                [$deleteHits, ['daysOld' => 4, 'batchIds' => [30]], $writeTypes, 1],
+            ],
+            '2 page_hits rows have been deleted.'.sprintf($limitReached, 2),
+            2,
+        ];
+
+        yield 'starts no later operation once the limit is reached' => [
+            [EventLogCleanup::EMAIL_STATS => true],
+            [
+                ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats_devices', [], [], $noRows],
+                ['SELECT prefix_table_email_stats_devices.id FROM prefix_table_email_stats_devices WHERE prefix_table_email_stats_devices.date_opened < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats_devices.id > :lastId ORDER BY prefix_table_email_stats_devices.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['3', '4']],
+                ['DELETE LOW_PRIORITY prefix_table_email_stats_devices FROM prefix_table_email_stats_devices WHERE prefix_table_email_stats_devices.date_opened < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats_devices.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [3, 4]], $writeTypes, 2],
+            ],
+            '2 email_stats_devices and 0 email_stats rows have been deleted.'.sprintf($limitReached, 2),
+            2,
+        ];
+
+        yield 'says nothing about the limit when the rows run out first' => [
+            [EventLogCleanup::PAGE_HITS => true],
+            [
+                [$rangeHits, [], [], $noRows],
+                [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
+                [$deleteHits, ['daysOld' => 4, 'batchIds' => [10, 20]], $writeTypes, 2],
+                [$selectHits, ['daysOld' => 4, 'lastId' => 20], $selectTypes, ['30']],
+                [$deleteHits, ['daysOld' => 4, 'batchIds' => [30]], $writeTypes, 1],
+            ],
+            '3 page_hits rows have been deleted.',
+            5,
+        ];
+    }
+
+    /**
+     * @dataProvider invalidRowLimitProvider
+     */
+    public function testRejectsAnInvalidRowLimitBeforeTouchingTheDatabase(?int $batchSize, int $maxRows): void
+    {
+        $connection = $this->createMock(Connection::class);
+        $connection->expects($this->never())
+            ->method('executeQuery');
+        $connection->expects($this->never())
+            ->method('beginTransaction');
+
+        $this->expectException(\InvalidArgumentException::class);
+
+        $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, $batchSize, $maxRows);
+    }
+
+    public static function invalidRowLimitProvider(): \Generator
+    {
+        yield 'without a batch size' => [null, 10];
+
+        yield 'zero' => [2, 0];
     }
 
     public function testBatchSizeIsIgnoredOnDryRun(): void
@@ -616,7 +692,7 @@ final class EventLogCleanupTest extends TestCase
 
         $this->assertSame(
             '5 page_hits rows would have been deleted. This is a dry run.',
-            $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, true, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, 2)
+            $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, true, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, 2, 1)
         );
     }
 

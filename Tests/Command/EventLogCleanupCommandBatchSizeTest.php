@@ -17,7 +17,7 @@ final class EventLogCleanupCommandBatchSizeTest extends TestCase
         $eventLogCleanup = $this->createMock(EventLogCleanup::class);
         $eventLogCleanup->expects($this->once())
             ->method('deleteEventLogEntries')
-            ->with(30, null, false, $this->anything(), $this->isInstanceOf(OutputInterface::class), [1, 44], 5000)
+            ->with(30, null, false, $this->anything(), $this->isInstanceOf(OutputInterface::class), [1, 44], 5000, null)
             ->willReturn('done');
 
         $commandTester = new CommandTester(new EventLogCleanupCommand($eventLogCleanup));
@@ -36,7 +36,7 @@ final class EventLogCleanupCommandBatchSizeTest extends TestCase
         $eventLogCleanup = $this->createMock(EventLogCleanup::class);
         $eventLogCleanup->expects($this->once())
             ->method('deleteEventLogEntries')
-            ->with(30, null, false, $this->anything(), $this->isInstanceOf(OutputInterface::class), null, null)
+            ->with(30, null, false, $this->anything(), $this->isInstanceOf(OutputInterface::class), null, null, null)
             ->willReturn('done');
 
         $commandTester = new CommandTester(new EventLogCleanupCommand($eventLogCleanup));
@@ -46,5 +46,71 @@ final class EventLogCleanupCommandBatchSizeTest extends TestCase
         ]);
 
         $this->assertSame(0, $commandTester->getStatusCode());
+    }
+
+    public function testPassesTheRowLimitToTheCleanup(): void
+    {
+        $eventLogCleanup = $this->createMock(EventLogCleanup::class);
+        $eventLogCleanup->expects($this->once())
+            ->method('deleteEventLogEntries')
+            ->with(30, null, false, $this->anything(), $this->isInstanceOf(OutputInterface::class), null, 5000, 20000)
+            ->willReturn('done');
+
+        $commandTester = new CommandTester(new EventLogCleanupCommand($eventLogCleanup));
+        $commandTester->execute([
+            '--days-old'   => 30,
+            '--page-hits'  => true,
+            '--batch-size' => '5000',
+            '--max-rows'   => '20000',
+        ]);
+
+        $this->assertSame(0, $commandTester->getStatusCode());
+    }
+
+    public function testRejectsARowLimitWithoutABatchSize(): void
+    {
+        $eventLogCleanup = $this->createMock(EventLogCleanup::class);
+        $eventLogCleanup->expects($this->never())
+            ->method('deleteEventLogEntries');
+
+        $commandTester = new CommandTester(new EventLogCleanupCommand($eventLogCleanup));
+        $commandTester->execute([
+            '--page-hits' => true,
+            '--max-rows'  => '20000',
+        ]);
+
+        $this->assertStringContainsString('--max-rows needs --batch-size.', $commandTester->getDisplay());
+        $this->assertSame(1, $commandTester->getStatusCode());
+    }
+
+    /**
+     * @dataProvider invalidRowLimitProvider
+     */
+    public function testRejectsARowLimitThatIsNotAWholeNumberAboveZero(string $maxRows): void
+    {
+        $eventLogCleanup = $this->createMock(EventLogCleanup::class);
+        $eventLogCleanup->expects($this->never())
+            ->method('deleteEventLogEntries');
+
+        $commandTester = new CommandTester(new EventLogCleanupCommand($eventLogCleanup));
+        $commandTester->execute([
+            '--page-hits'  => true,
+            '--batch-size' => '5000',
+            '--max-rows'   => $maxRows,
+        ]);
+
+        $this->assertStringContainsString('--max-rows must be a whole number greater than 0.', $commandTester->getDisplay());
+        $this->assertSame(1, $commandTester->getStatusCode());
+    }
+
+    public static function invalidRowLimitProvider(): \Generator
+    {
+        yield 'zero' => ['0'];
+
+        yield 'negative' => ['-5'];
+
+        yield 'decimal' => ['1.5'];
+
+        yield 'text' => ['all'];
     }
 }

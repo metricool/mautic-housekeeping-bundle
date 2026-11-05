@@ -117,6 +117,8 @@ class EventLogCleanup
      */
     private array $leadObjects = [];
 
+    private ?int $rowsLeft = null;
+
     public function __construct(private readonly Connection $connection, ?string $dbPrefix, private readonly Config $config, private readonly LoggerInterface $logger)
     {
         $this->dbPrefix = $dbPrefix ?? '';
@@ -133,14 +135,23 @@ class EventLogCleanup
     }
 
     /**
+     * A run with $maxRows stops once it has deleted or changed that many rows in all, and later operations do not start.
+     * Rows removed through a foreign key cascade are not counted. It needs $batchSize, and a dry run ignores it.
+     *
      * @param non-empty-array<string, bool> $operations
      * @param list<int>|null                $excludeEmailIds
      */
-    public function deleteEventLogEntries(int $daysOld, ?int $campaignId, bool $dryRun, array $operations, OutputInterface $output, ?array $excludeEmailIds = null, ?int $batchSize = null): string
+    public function deleteEventLogEntries(int $daysOld, ?int $campaignId, bool $dryRun, array $operations, OutputInterface $output, ?array $excludeEmailIds = null, ?int $batchSize = null, ?int $maxRows = null): string
     {
         if (!$this->config->isPublished()) {
             return 'Housekeeping by Leuchtfeuer is currently not enabled. To use it, please enable the plugin in your Mautic plugin management.';
         }
+
+        if (null !== $maxRows && ($maxRows < 1 || (null === $batchSize && !$dryRun))) {
+            throw new \InvalidArgumentException('A row limit must be greater than 0 and needs a batch size.');
+        }
+
+        $this->rowsLeft = $dryRun ? null : $maxRows;
 
         if (self::DEFAULT_DAYS !== $daysOld) {
             foreach ($this->params as $index => $item) {
@@ -226,7 +237,7 @@ class EventLogCleanup
             }
         } elseif (null !== $batchSize) {
             foreach ($operations as $operation => $enabled) {
-                if (false === $enabled) {
+                if (false === $enabled || 0 === $this->rowsLeft) {
                     continue;
                 }
 
@@ -289,6 +300,10 @@ class EventLogCleanup
             $message .= $this->dryRunMessage;
         }
 
+        if (0 === $this->rowsLeft) {
+            $message .= ' Stopped at the limit of '.$maxRows.' rows for this run. Any rows left wait for the next run.';
+        }
+
         return $message;
     }
 
@@ -324,6 +339,7 @@ class EventLogCleanup
      * The write repeats the conditions, so a row that stopped matching after the select stays.
      * The select stops where the rows newer than the cutoff begin, so the last batch does not read on to the end of the table.
      * A row older than the cutoff with an ID past that point waits for a later run.
+     * Under a row limit, a batch selects no more rows than the limit has left, so the run never writes past it.
      */
     private function runOperationInBatches(string $operation, int $batchSize, OutputInterface $output): int
     {
@@ -332,7 +348,7 @@ class EventLogCleanup
         $template     = str_replace(self::PREFIX, $this->dbPrefix, $this->queriesTemplate[$operation]);
         $firstNewerId = $this->findFirstNewerId($operation, $table);
         $idBound      = null === $firstNewerId ? '' : ' AND '.$idColumn.' < '.$firstNewerId;
-        $selectSql    = 'SELECT '.$idColumn.' FROM '.str_replace(self::SET, '', $template).' AND '.$idColumn.' > :lastId'.$idBound.' ORDER BY '.$idColumn.' LIMIT '.$batchSize;
+        $selectSql    = 'SELECT '.$idColumn.' FROM '.str_replace(self::SET, '', $template).' AND '.$idColumn.' > :lastId'.$idBound.' ORDER BY '.$idColumn.' LIMIT ';
         $writeSql     = 'DELETE LOW_PRIORITY '.$table.' FROM '.$template.' AND '.$idColumn.' IN (:batchIds)';
 
         if (array_key_exists($operation, $this->update)) {
@@ -340,7 +356,7 @@ class EventLogCleanup
         }
 
         if ($output->isVerbose()) {
-            $output->writeln($selectSql);
+            $output->writeln($selectSql.$batchSize);
             $output->writeln($writeSql);
         }
 
@@ -348,8 +364,9 @@ class EventLogCleanup
         $lastId       = 0;
 
         do {
-            $ids = $this->connection->executeQuery(
-                $selectSql,
+            $limit = null === $this->rowsLeft ? $batchSize : min($batchSize, $this->rowsLeft);
+            $ids   = $this->connection->executeQuery(
+                $selectSql.$limit,
                 $this->params[$operation] + ['lastId' => $lastId],
                 $this->types[$operation] + ['lastId' => \PDO::PARAM_INT]
             )->fetchFirstColumn();
@@ -360,14 +377,20 @@ class EventLogCleanup
 
             $ids = array_map(intval(...), $ids);
 
-            $affectedRows += $this->connection->executeQuery(
+            $writtenRows = $this->connection->executeQuery(
                 $writeSql,
                 $this->params[$operation] + ['batchIds' => $ids],
                 $this->types[$operation] + ['batchIds' => ArrayParameterType::INTEGER]
             )->rowCount();
 
+            $affectedRows += $writtenRows;
+
+            if (null !== $this->rowsLeft) {
+                $this->rowsLeft = max(0, $this->rowsLeft - $writtenRows);
+            }
+
             $lastId = max($ids);
-        } while (count($ids) === $batchSize);
+        } while (count($ids) === $limit && 0 !== $this->rowsLeft);
 
         return $affectedRows;
     }

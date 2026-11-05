@@ -90,6 +90,40 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $this->assertSame(0, $commandTester->getStatusCode());
     }
 
+    public function testStopsAtTheRowLimitAndLeavesTheRestForTheNextRun(): void
+    {
+        $this->fixtureHelper->enablePlugin();
+
+        $contact = $this->fixtureHelper->createContact('batched-limit@test.com');
+        $oldDate = $this->fixtureHelper->daysAgo(400);
+
+        $this->fixtureHelper->createPageHit($contact, $oldDate);
+        $this->fixtureHelper->createPageHit($contact, $oldDate);
+        $leftHit   = $this->fixtureHelper->createPageHit($contact, $oldDate);
+        $recentHit = $this->fixtureHelper->createPageHit($contact, $this->fixtureHelper->daysAgo(10));
+
+        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            '--days-old'   => 30,
+            '--page-hits'  => true,
+            '--batch-size' => 5,
+            '--max-rows'   => 2,
+        ]);
+
+        $this->em->clear();
+
+        $hits = $this->em->getRepository(Hit::class)->findBy(['lead' => $contact->getId()]);
+        $this->assertCount(2, $hits);
+
+        $hitIds = array_map(static fn (Hit $hit): int => (int) $hit->getId(), $hits);
+        $this->assertContains((int) $leftHit->getId(), $hitIds);
+        $this->assertContains((int) $recentHit->getId(), $hitIds);
+
+        $output = $commandTester->getDisplay();
+        $this->assertStringContainsString('2 page_hits', $output);
+        $this->assertStringContainsString('Stopped at the limit of 2 rows for this run.', $output);
+        $this->assertSame(0, $commandTester->getStatusCode());
+    }
+
     public function testLeadObjectKeepsOtherObjectsAcrossBatches(): void
     {
         $this->fixtureHelper->enablePlugin();
