@@ -322,7 +322,7 @@ class EventLogCleanup
      * Deletes or updates the rows of one operation in batches, each committed on its own.
      * It selects forward by ID, so rows the conditions keep are not read again for every batch.
      * The write repeats the conditions, so a row that stopped matching after the select stays.
-     * The select stops at the first row newer than the cutoff, so the last batch does not read on to the end of the table.
+     * The select stops where the rows newer than the cutoff begin, so the last batch does not read on to the end of the table.
      * A row older than the cutoff with an ID past that point waits for a later run.
      */
     private function runOperationInBatches(string $operation, int $batchSize, OutputInterface $output): int
@@ -373,8 +373,9 @@ class EventLogCleanup
     }
 
     /**
-     * Returns the ID of the first row newer than the cutoff, or null when there is none or the table has no date column to go by.
-     * It walks the primary key from the start, so it reads only the rows older than the cutoff.
+     * Finds where the rows newer than the cutoff begin, by a binary search on the ID, so it reads about 30 rows whatever the size of the table.
+     * Returns null when no row is newer than the cutoff, or the table has no date column to go by.
+     * Rows out of date order can only move the result a little, and the select and the write still check the conditions.
      */
     private function findFirstNewerId(string $operation, string $table): ?int
     {
@@ -382,13 +383,38 @@ class EventLogCleanup
             return null;
         }
 
-        $firstNewerId = $this->connection->executeQuery(
-            'SELECT id FROM '.$table.' FORCE INDEX (PRIMARY) WHERE '.self::DATE_COLUMNS[$operation].' >= DATE_SUB(NOW(),INTERVAL :daysOld DAY) ORDER BY id LIMIT 1',
-            ['daysOld' => $this->params[$operation]['daysOld']],
-            ['daysOld' => \PDO::PARAM_INT]
-        )->fetchOne();
+        [$low, $high] = $this->connection->executeQuery('SELECT MIN(id), MAX(id) FROM '.$table, [], [])->fetchNumeric();
 
-        return false === $firstNewerId ? null : (int) $firstNewerId;
+        if (null === $high || !$this->isNewerFromId($operation, $table, (int) $high)) {
+            return null;
+        }
+
+        $low  = (int) $low;
+        $high = (int) $high;
+
+        while ($low < $high) {
+            $middle = $low + (int) (($high - $low) / 2);
+
+            if ($this->isNewerFromId($operation, $table, $middle)) {
+                $high = $middle;
+            } else {
+                $low = $middle + 1;
+            }
+        }
+
+        return $low;
+    }
+
+    /**
+     * Tells whether the first row at or after this ID is newer than the cutoff.
+     */
+    private function isNewerFromId(string $operation, string $table, int $id): bool
+    {
+        return (bool) $this->connection->executeQuery(
+            'SELECT '.self::DATE_COLUMNS[$operation].' >= DATE_SUB(NOW(),INTERVAL :daysOld DAY) FROM '.$table.' WHERE id >= :probeId ORDER BY id LIMIT 1',
+            ['daysOld' => $this->params[$operation]['daysOld'], 'probeId' => $id],
+            ['daysOld' => \PDO::PARAM_INT, 'probeId' => \PDO::PARAM_INT]
+        )->fetchOne();
     }
 
     public function optimizeTables(OutputInterface $output): string
