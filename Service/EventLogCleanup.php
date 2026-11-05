@@ -29,6 +29,17 @@ class EventLogCleanup
     public const PAGE_HITS            = 'page_hits';
 
     /**
+     * The date column of each table whose IDs grow with that date. The campaign log is left out, because its date_triggered can be set long after the row is created.
+     */
+    private const DATE_COLUMNS = [
+        self::LEAD_EVENTS         => 'date_added',
+        self::EMAIL_STATS         => 'date_sent',
+        self::EMAIL_STATS_TOKENS  => 'date_sent',
+        self::EMAIL_STATS_DEVICES => 'date_opened',
+        self::PAGE_HITS           => 'date_hit',
+    ];
+
+    /**
      * @var array<string, string>
      */
     private array $queriesTemplate = [
@@ -311,14 +322,18 @@ class EventLogCleanup
      * Deletes or updates the rows of one operation in batches, each committed on its own.
      * It selects forward by ID, so rows the conditions keep are not read again for every batch.
      * The write repeats the conditions, so a row that stopped matching after the select stays.
+     * The select stops where the rows newer than the cutoff begin, so the last batch does not read on to the end of the table.
+     * A row older than the cutoff with an ID past that point waits for a later run.
      */
     private function runOperationInBatches(string $operation, int $batchSize, OutputInterface $output): int
     {
-        $table     = $this->dbPrefix.(self::EMAIL_STATS_TOKENS === $operation ? self::EMAIL_STATS : $operation);
-        $idColumn  = $table.'.id';
-        $template  = str_replace(self::PREFIX, $this->dbPrefix, $this->queriesTemplate[$operation]);
-        $selectSql = 'SELECT '.$idColumn.' FROM '.str_replace(self::SET, '', $template).' AND '.$idColumn.' > :lastId ORDER BY '.$idColumn.' LIMIT '.$batchSize;
-        $writeSql  = 'DELETE LOW_PRIORITY '.$table.' FROM '.$template.' AND '.$idColumn.' IN (:batchIds)';
+        $table        = $this->dbPrefix.(self::EMAIL_STATS_TOKENS === $operation ? self::EMAIL_STATS : $operation);
+        $idColumn     = $table.'.id';
+        $template     = str_replace(self::PREFIX, $this->dbPrefix, $this->queriesTemplate[$operation]);
+        $firstNewerId = $this->findFirstNewerId($operation, $table);
+        $idBound      = null === $firstNewerId ? '' : ' AND '.$idColumn.' < '.$firstNewerId;
+        $selectSql    = 'SELECT '.$idColumn.' FROM '.str_replace(self::SET, '', $template).' AND '.$idColumn.' > :lastId'.$idBound.' ORDER BY '.$idColumn.' LIMIT '.$batchSize;
+        $writeSql     = 'DELETE LOW_PRIORITY '.$table.' FROM '.$template.' AND '.$idColumn.' IN (:batchIds)';
 
         if (array_key_exists($operation, $this->update)) {
             $writeSql = 'UPDATE LOW_PRIORITY '.str_replace(self::SET, $this->update[$operation], $template).' AND '.$idColumn.' IN (:batchIds)';
@@ -355,6 +370,52 @@ class EventLogCleanup
         } while (count($ids) === $batchSize);
 
         return $affectedRows;
+    }
+
+    /**
+     * Finds where the rows newer than the cutoff begin, by a binary search on the ID, so it reads about 30 rows whatever the size of the table.
+     * Returns null when the search finds no newer row, or the table has no date column to go by.
+     * The result only limits how far the select reads. The select and the write still check the conditions, so a row out of date order
+     * can move the result, but a row newer than the cutoff is never removed, and an older one is at most left for a later run.
+     */
+    private function findFirstNewerId(string $operation, string $table): ?int
+    {
+        if (!array_key_exists($operation, self::DATE_COLUMNS)) {
+            return null;
+        }
+
+        [$low, $high] = $this->connection->executeQuery('SELECT MIN(id), MAX(id) FROM '.$table, [], [])->fetchNumeric();
+
+        if (null === $high) {
+            return null;
+        }
+
+        $low  = (int) $low;
+        $high = (int) $high;
+
+        while ($low < $high) {
+            $middle = $low + (int) (($high - $low) / 2);
+
+            if ($this->isNewerFromId($operation, $table, $middle)) {
+                $high = $middle;
+            } else {
+                $low = $middle + 1;
+            }
+        }
+
+        return $this->isNewerFromId($operation, $table, $low) ? $low : null;
+    }
+
+    /**
+     * Tells whether the first row at or after this ID is newer than the cutoff.
+     */
+    private function isNewerFromId(string $operation, string $table, int $id): bool
+    {
+        return (bool) $this->connection->executeQuery(
+            'SELECT '.self::DATE_COLUMNS[$operation].' >= DATE_SUB(NOW(),INTERVAL :daysOld DAY) FROM '.$table.' WHERE id >= :probeId ORDER BY id LIMIT 1',
+            ['daysOld' => $this->params[$operation]['daysOld'], 'probeId' => $id],
+            ['daysOld' => \PDO::PARAM_INT, 'probeId' => \PDO::PARAM_INT]
+        )->fetchOne();
     }
 
     public function optimizeTables(OutputInterface $output): string
