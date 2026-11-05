@@ -37,8 +37,8 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $this->fixtureHelper->createPageHit($contact, $oldDate);
         $excludedHit = $this->fixtureHelper->createPageHit($contact, $oldDate, $excludedEmail);
         $this->fixtureHelper->createPageHit($contact, $oldDate, $otherEmail);
-        $recentHit = $this->fixtureHelper->createPageHit($contact, $this->fixtureHelper->daysAgo(10));
         $this->fixtureHelper->createPageHit($contact, $oldDate);
+        $recentHit = $this->fixtureHelper->createPageHit($contact, $this->fixtureHelper->daysAgo(10));
 
         $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
             '--days-old'       => 30,
@@ -57,6 +57,36 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $this->assertContains((int) $recentHit->getId(), $hitIds);
 
         $this->assertStringContainsString('3 page_hits', $commandTester->getDisplay());
+        $this->assertSame(0, $commandTester->getStatusCode());
+    }
+
+    public function testStopsAtTheFirstNewerRowAndLeavesLaterOldRowsForALaterRun(): void
+    {
+        $this->fixtureHelper->enablePlugin();
+
+        $contact = $this->fixtureHelper->createContact('batched-bound@test.com');
+        $oldDate = $this->fixtureHelper->daysAgo(400);
+
+        $this->fixtureHelper->createPageHit($contact, $oldDate);
+        $recentHit   = $this->fixtureHelper->createPageHit($contact, $this->fixtureHelper->daysAgo(10));
+        $laterOldHit = $this->fixtureHelper->createPageHit($contact, $oldDate);
+
+        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            '--days-old'   => 30,
+            '--page-hits'  => true,
+            '--batch-size' => 1,
+        ]);
+
+        $this->em->clear();
+
+        $hits = $this->em->getRepository(Hit::class)->findBy(['lead' => $contact->getId()]);
+        $this->assertCount(2, $hits);
+
+        $hitIds = array_map(static fn (Hit $hit): int => (int) $hit->getId(), $hits);
+        $this->assertContains((int) $recentHit->getId(), $hitIds);
+        $this->assertContains((int) $laterOldHit->getId(), $hitIds);
+
+        $this->assertStringContainsString('1 page_hits', $commandTester->getDisplay());
         $this->assertSame(0, $commandTester->getStatusCode());
     }
 
