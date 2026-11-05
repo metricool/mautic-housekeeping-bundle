@@ -374,8 +374,9 @@ class EventLogCleanup
 
     /**
      * Finds where the rows newer than the cutoff begin, by a binary search on the ID, so it reads about 30 rows whatever the size of the table.
-     * Returns null when no row is newer than the cutoff, or the table has no date column to go by.
-     * Rows out of date order can only move the result a little, and the select and the write still check the conditions.
+     * Returns null when the search finds no newer row, or the table has no date column to go by.
+     * The result only limits how far the select reads. The select and the write still check the conditions, so a row out of date order
+     * can move the result, but a row newer than the cutoff is never removed, and an older one is at most left for a later run.
      */
     private function findFirstNewerId(string $operation, string $table): ?int
     {
@@ -385,7 +386,7 @@ class EventLogCleanup
 
         [$low, $high] = $this->connection->executeQuery('SELECT MIN(id), MAX(id) FROM '.$table, [], [])->fetchNumeric();
 
-        if (null === $high || !$this->isNewerFromId($operation, $table, (int) $high)) {
+        if (null === $high) {
             return null;
         }
 
@@ -402,7 +403,7 @@ class EventLogCleanup
             }
         }
 
-        return $low;
+        return $this->isNewerFromId($operation, $table, $low) ? $low : null;
     }
 
     /**
