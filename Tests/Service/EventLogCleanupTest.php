@@ -504,10 +504,10 @@ final class EventLogCleanupTest extends TestCase
             [EventLogCleanup::PAGE_HITS => true],
             [
                 [$rangeHits, [], [], ['1', '8']],
-                [$probeHits, ['daysOld' => 4, 'probeId' => 8], $probeTypes, 1],
                 [$probeHits, ['daysOld' => 4, 'probeId' => 4], $probeTypes, 0],
                 [$probeHits, ['daysOld' => 4, 'probeId' => 6], $probeTypes, 1],
                 [$probeHits, ['daysOld' => 4, 'probeId' => 5], $probeTypes, 0],
+                [$probeHits, ['daysOld' => 4, 'probeId' => 6], $probeTypes, 1],
                 ['SELECT prefix_table_page_hits.id FROM prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_page_hits.id > :lastId AND prefix_table_page_hits.id < 6 ORDER BY prefix_table_page_hits.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['3']],
                 [$deleteHits, ['daysOld' => 4, 'batchIds' => [3]], $writeTypes, 1],
             ],
@@ -518,6 +518,9 @@ final class EventLogCleanupTest extends TestCase
             [EventLogCleanup::PAGE_HITS => true],
             [
                 [$rangeHits, [], [], ['1', '8']],
+                [$probeHits, ['daysOld' => 4, 'probeId' => 4], $probeTypes, 0],
+                [$probeHits, ['daysOld' => 4, 'probeId' => 6], $probeTypes, 0],
+                [$probeHits, ['daysOld' => 4, 'probeId' => 7], $probeTypes, 0],
                 [$probeHits, ['daysOld' => 4, 'probeId' => 8], $probeTypes, 0],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, []],
             ],
