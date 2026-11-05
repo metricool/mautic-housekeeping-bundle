@@ -14,7 +14,8 @@ use Symfony\Component\Console\Output\OutputInterface;
 
 final class EventLogCleanupTest extends TestCase
 {
-    private const KEYS_SQL = 'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, r.DELETE_RULE AS delete_rule FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.CONSTRAINT_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table';
+    private const COLUMNS_SQL = 'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table ORDER BY ORDINAL_POSITION';
+    private const KEYS_SQL    = 'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column, r.DELETE_RULE AS delete_rule FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.CONSTRAINT_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table';
 
     /**
      * @dataProvider runProvider
@@ -705,22 +706,33 @@ final class EventLogCleanupTest extends TestCase
                 ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats_devices', [], [], $noRows],
                 [self::KEYS_SQL, ['table' => 'prefix_table_email_stats_devices'], $keysTypes, []],
                 ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_email_stats_devices SELECT * FROM prefix_table_email_stats_devices LIMIT 0', [], [], null],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_email_stats_devices'], $keysTypes, ['id', 'stat_id']],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_email_stats_devices'], $keysTypes, ['id', 'stat_id']],
                 ['SELECT prefix_table_email_stats_devices.id FROM '.$devices.' AND prefix_table_email_stats_devices.id > :lastId ORDER BY prefix_table_email_stats_devices.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, []],
                 ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats', [], [], $noRows],
                 [self::KEYS_SQL, ['table' => 'prefix_table_email_stats'], $keysTypes, [
-                    ['child_table' => 'prefix_table_email_stat_replies', 'child_column' => 'stat_id', 'delete_rule' => 'CASCADE'],
-                    ['child_table' => 'prefix_table_email_stats_devices', 'child_column' => 'stat_id', 'delete_rule' => 'CASCADE'],
-                    ['child_table' => 'prefix_table_some_report', 'child_column' => 'stat_id', 'delete_rule' => 'RESTRICT'],
+                    ['child_table' => 'prefix_table_email_stat_replies', 'child_column' => 'stat_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE'],
+                    ['child_table' => 'prefix_table_email_stats_devices', 'child_column' => 'stat_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE'],
+                    ['child_table' => 'prefix_table_some_report', 'child_column' => 'stat_id', 'referenced_column' => 'id', 'delete_rule' => 'RESTRICT'],
+                    ['child_table' => 'prefix_table_some_report', 'child_column' => 'stat_hash', 'referenced_column' => 'tracking_hash', 'delete_rule' => 'NO ACTION'],
                 ]],
                 [self::KEYS_SQL, ['table' => 'prefix_table_email_stat_replies'], $keysTypes, []],
                 [self::KEYS_SQL, ['table' => 'prefix_table_email_stats_devices'], $keysTypes, []],
                 ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_email_stat_replies SELECT * FROM prefix_table_email_stat_replies LIMIT 0', [], [], null],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_email_stat_replies'], $keysTypes, ['id', 'stat_id']],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_email_stat_replies'], $keysTypes, ['id', 'stat_id']],
                 ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_email_stats_devices SELECT * FROM prefix_table_email_stats_devices LIMIT 0', [], [], null],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_email_stats_devices'], $keysTypes, ['id', 'stat_id']],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_email_stats_devices'], $keysTypes, ['id', 'stat_id']],
                 ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_email_stats SELECT * FROM prefix_table_email_stats LIMIT 0', [], [], null],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_email_stats'], $keysTypes, ['id', 'email_id']],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_email_stats'], $keysTypes, ['id', 'email_id']],
                 ['SELECT prefix_table_email_stats.id FROM '.$statsWhere.' AND prefix_table_email_stats.id > :lastId ORDER BY prefix_table_email_stats.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['5', '6']],
                 ['SELECT prefix_table_email_stats.id FROM prefix_table_email_stats WHERE prefix_table_email_stats.id IN (:batchIds) FOR UPDATE', ['batchIds' => [5, 6]], $batchTypes, null],
                 ['SELECT prefix_table_email_stats.id FROM '.$statsWhere.' AND prefix_table_email_stats.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [5, 6]], $writeTypes, ['5']],
+                ['SELECT COUNT(*) FROM prefix_table_email_stat_replies WHERE stat_id IN (:batchIds) FOR UPDATE', ['batchIds' => [5]], $batchTypes, '0'],
                 ['INSERT INTO prefix_table_housekeeping_archive_email_stat_replies SELECT * FROM prefix_table_email_stat_replies WHERE stat_id IN (:batchIds)', ['batchIds' => [5]], $batchTypes, 0],
+                ['SELECT COUNT(*) FROM prefix_table_email_stats_devices WHERE stat_id IN (:batchIds) FOR UPDATE', ['batchIds' => [5]], $batchTypes, '2'],
                 ['INSERT INTO prefix_table_housekeeping_archive_email_stats_devices SELECT * FROM prefix_table_email_stats_devices WHERE stat_id IN (:batchIds)', ['batchIds' => [5]], $batchTypes, 2],
                 ['INSERT INTO prefix_table_housekeeping_archive_email_stats SELECT * FROM prefix_table_email_stats WHERE id IN (:batchIds)', ['batchIds' => [5]], $batchTypes, 1],
                 ['DELETE LOW_PRIORITY prefix_table_email_stats FROM '.$statsWhere.' AND prefix_table_email_stats.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [5]], $writeTypes, 1],
@@ -737,6 +749,8 @@ final class EventLogCleanupTest extends TestCase
             [
                 ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats', [], [], $noRows],
                 ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_email_stats_tokens SELECT * FROM prefix_table_email_stats LIMIT 0', [], [], null],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_email_stats_tokens'], ['table' => \PDO::PARAM_STR], ['id', 'tokens']],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_email_stats'], ['table' => \PDO::PARAM_STR], ['id', 'tokens']],
                 ['SELECT prefix_table_email_stats.id FROM '.$tokensWhere.' AND prefix_table_email_stats.id > :lastId ORDER BY prefix_table_email_stats.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['7']],
                 ['SELECT prefix_table_email_stats.id FROM prefix_table_email_stats WHERE prefix_table_email_stats.id IN (:batchIds) FOR UPDATE', ['batchIds' => [7]], $batchTypes, null],
                 ['SELECT prefix_table_email_stats.id FROM '.$tokensWhere.' AND prefix_table_email_stats.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [7]], $writeTypes, ['7']],
@@ -748,27 +762,68 @@ final class EventLogCleanupTest extends TestCase
         ];
     }
 
-    public function testArchiveRollsTheBatchBackWhenTheWriteDiffersFromTheCopy(): void
+    /**
+     * @dataProvider mismatchedCopyProvider
+     *
+     * @param list<array{0: string, 1: array<string, mixed>, 2: array<string, int>, 3: mixed}> $calls
+     */
+    public function testArchiveRollsTheBatchBackWhenACountDiffers(array $calls, string $error): void
+    {
+        $connection = $this->createArchiveConnection($calls, 1, 0, 1);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage($error);
+
+        $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, 2, null, true);
+    }
+
+    public static function mismatchedCopyProvider(): \Generator
     {
         $batchTypes = ['batchIds' => ArrayParameterType::INTEGER];
         $writeTypes = ['daysOld' => \PDO::PARAM_INT, 'batchIds' => ArrayParameterType::INTEGER];
+        $keysTypes  = ['table' => \PDO::PARAM_STR];
         $hitsWhere  = 'prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY)';
-
-        $connection = $this->createArchiveConnection([
-            ['SELECT MIN(id), MAX(id) FROM prefix_table_page_hits', [], [], [null, null]],
-            [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], ['table' => \PDO::PARAM_STR], []],
-            ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_page_hits SELECT * FROM prefix_table_page_hits LIMIT 0', [], [], null],
+        $range      = ['SELECT MIN(id), MAX(id) FROM prefix_table_page_hits', [], [], [null, null]];
+        $create     = ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_page_hits SELECT * FROM prefix_table_page_hits LIMIT 0', [], [], null];
+        $columns    = [
+            [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_page_hits'], $keysTypes, ['id', 'date_hit']],
+            [self::COLUMNS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, ['id', 'date_hit']],
+        ];
+        $batch      = [
             ['SELECT prefix_table_page_hits.id FROM '.$hitsWhere.' AND prefix_table_page_hits.id > :lastId ORDER BY prefix_table_page_hits.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], ['daysOld' => \PDO::PARAM_INT, 'lastId' => \PDO::PARAM_INT], ['10', '20']],
             ['SELECT prefix_table_page_hits.id FROM prefix_table_page_hits WHERE prefix_table_page_hits.id IN (:batchIds) FOR UPDATE', ['batchIds' => [10, 20]], $batchTypes, null],
             ['SELECT prefix_table_page_hits.id FROM '.$hitsWhere.' AND prefix_table_page_hits.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [10, 20]], $writeTypes, ['10', '20']],
-            ['INSERT INTO prefix_table_housekeeping_archive_page_hits SELECT * FROM prefix_table_page_hits WHERE id IN (:batchIds)', ['batchIds' => [10, 20]], $batchTypes, 2],
-            ['DELETE LOW_PRIORITY prefix_table_page_hits FROM '.$hitsWhere.' AND prefix_table_page_hits.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [10, 20]], $writeTypes, 1],
-        ], 1, 0, 1);
+        ];
 
-        $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Archive check failed on prefix_table_page_hits: 2 rows copied, 1 written, 2 expected. The batch was rolled back.');
+        yield 'the write removes fewer rows than were copied' => [
+            [
+                $range,
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, []],
+                $create,
+                ...$columns,
+                ...$batch,
+                ['INSERT INTO prefix_table_housekeeping_archive_page_hits SELECT * FROM prefix_table_page_hits WHERE id IN (:batchIds)', ['batchIds' => [10, 20]], $batchTypes, 2],
+                ['DELETE LOW_PRIORITY prefix_table_page_hits FROM '.$hitsWhere.' AND prefix_table_page_hits.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [10, 20]], $writeTypes, 1],
+            ],
+            'Archive check failed on prefix_table_page_hits: 2 rows copied, 1 written, 2 expected. The batch was rolled back.',
+        ];
 
-        $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, 2, null, true);
+        yield 'a child copy holds fewer rows than were locked' => [
+            [
+                $range,
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE']]],
+                [self::KEYS_SQL, ['table' => 'prefix_table_hit_notes'], $keysTypes, []],
+                ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_hit_notes SELECT * FROM prefix_table_hit_notes LIMIT 0', [], [], null],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_hit_notes'], $keysTypes, ['id', 'hit_id']],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_hit_notes'], $keysTypes, ['id', 'hit_id']],
+                $create,
+                ...$columns,
+                ...$batch,
+                ['SELECT COUNT(*) FROM prefix_table_hit_notes WHERE hit_id IN (:batchIds) FOR UPDATE', ['batchIds' => [10, 20]], $batchTypes, '3'],
+                ['INSERT INTO prefix_table_housekeeping_archive_hit_notes SELECT * FROM prefix_table_hit_notes WHERE hit_id IN (:batchIds)', ['batchIds' => [10, 20]], $batchTypes, 2],
+            ],
+            'Archive check failed on prefix_table_hit_notes: 2 rows copied, 3 expected. The batch was rolled back.',
+        ];
     }
 
     /**
@@ -794,7 +849,7 @@ final class EventLogCleanupTest extends TestCase
         yield 'a child set to NULL' => [
             [
                 $range,
-                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'delete_rule' => 'SET NULL']]],
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'SET NULL']]],
             ],
             'Cannot archive prefix_table_page_hits, because a delete there changes prefix_table_hit_notes through SET NULL.',
         ];
@@ -802,10 +857,40 @@ final class EventLogCleanupTest extends TestCase
         yield 'a cascade two levels deep' => [
             [
                 $range,
-                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'delete_rule' => 'CASCADE']]],
-                [self::KEYS_SQL, ['table' => 'prefix_table_hit_notes'], $keysTypes, [['child_table' => 'prefix_table_note_tags', 'child_column' => 'note_id', 'delete_rule' => 'CASCADE']]],
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE']]],
+                [self::KEYS_SQL, ['table' => 'prefix_table_hit_notes'], $keysTypes, [['child_table' => 'prefix_table_note_tags', 'child_column' => 'note_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE']]],
             ],
             'Cannot archive prefix_table_page_hits, because a delete there cascades from prefix_table_hit_notes to further tables.',
+        ];
+
+        yield 'a cascade through a key on another column' => [
+            [
+                $range,
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_code', 'referenced_column' => 'code', 'delete_rule' => 'CASCADE']]],
+            ],
+            'Cannot archive prefix_table_page_hits, because the cascade to prefix_table_hit_notes does not come through one key on its id.',
+        ];
+
+        yield 'two cascading key columns from one child' => [
+            [
+                $range,
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [
+                    ['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE'],
+                    ['child_table' => 'prefix_table_hit_notes', 'child_column' => 'first_hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE'],
+                ]],
+            ],
+            'Cannot archive prefix_table_page_hits, because the cascade to prefix_table_hit_notes does not come through one key on its id.',
+        ];
+
+        yield 'an archive table whose columns moved' => [
+            [
+                $range,
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, []],
+                ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_page_hits SELECT * FROM prefix_table_page_hits LIMIT 0', [], [], null],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_page_hits'], $keysTypes, ['id', 'email_id', 'date_hit']],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, ['id', 'date_hit', 'email_id']],
+            ],
+            'Cannot archive into prefix_table_housekeeping_archive_page_hits, because its columns no longer match prefix_table_page_hits. Rename or drop it, and the next run makes a new one.',
         ];
     }
 
@@ -862,8 +947,10 @@ final class EventLogCleanupTest extends TestCase
                 $result = $this->createStub(Result::class);
                 if (str_contains($sql, 'MIN(id)')) {
                     $result->method('fetchNumeric')->willReturn($call[3]);
-                } elseif (str_contains($sql, 'information_schema')) {
+                } elseif (str_contains($sql, 'KEY_COLUMN_USAGE')) {
                     $result->method('fetchAllAssociative')->willReturn($call[3]);
+                } elseif (str_contains($sql, 'COUNT(*)')) {
+                    $result->method('fetchOne')->willReturn($call[3]);
                 } elseif (is_array($call[3])) {
                     $result->method('fetchFirstColumn')->willReturn($call[3]);
                 } elseif (is_int($call[3])) {

@@ -428,6 +428,7 @@ class EventLogCleanup
      * Creates the archive tables an operation needs, and returns the statements each batch uses to copy its rows.
      * A delete also copies the rows of each child table that a foreign key cascade empties with it.
      * The archive tables are made with CREATE TABLE ... SELECT, so they have the same columns as their source, with no keys, and generated columns become plain ones.
+     * Rows are copied by column position, so an archive table whose column names or order differ from its source is rejected.
      *
      * @return array{lock: string, match: string, table: string, source: string, children: list<array{table: string, source: string, column: string}>}
      */
@@ -450,6 +451,10 @@ class EventLogCleanup
 
         foreach ([...$children, ['table' => $archiveTable, 'source' => $table]] as $copy) {
             $this->connection->executeQuery('CREATE TABLE IF NOT EXISTS '.$copy['table'].' SELECT * FROM '.$copy['source'].' LIMIT 0', [], []);
+
+            if ($this->columnsOf($copy['table']) !== $this->columnsOf($copy['source'])) {
+                throw new \RuntimeException('Cannot archive into '.$copy['table'].', because its columns no longer match '.$copy['source'].'. Rename or drop it, and the next run makes a new one.');
+            }
         }
 
         return [
@@ -464,6 +469,7 @@ class EventLogCleanup
     /**
      * Lists the child tables whose rows a delete on this table removes through a foreign key cascade, each with its column that points here.
      * Rejects a table that a delete would change through SET NULL or SET DEFAULT, because a copy of the deleted rows could not undo that.
+     * Rejects a cascade that does not come through one single-column key on the parent's id, because the copy finds the child rows by that key.
      *
      * @return array<string, string>
      */
@@ -471,7 +477,7 @@ class EventLogCleanup
     {
         $children = [];
         $keys     = $this->connection->executeQuery(
-            'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, r.DELETE_RULE AS delete_rule FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.CONSTRAINT_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table',
+            'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column, r.DELETE_RULE AS delete_rule FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.CONSTRAINT_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table',
             ['table' => $table],
             ['table' => \PDO::PARAM_STR]
         )->fetchAllAssociative();
@@ -482,6 +488,10 @@ class EventLogCleanup
             }
 
             if ('CASCADE' === $key['delete_rule']) {
+                if ('id' !== $key['referenced_column'] || array_key_exists((string) $key['child_table'], $children)) {
+                    throw new \RuntimeException('Cannot archive '.$table.', because the cascade to '.$key['child_table'].' does not come through one key on its id.');
+                }
+
                 $children[(string) $key['child_table']] = (string) $key['child_column'];
             }
         }
@@ -490,9 +500,22 @@ class EventLogCleanup
     }
 
     /**
+     * @return list<string>
+     */
+    private function columnsOf(string $table): array
+    {
+        return array_map(strval(...), $this->connection->executeQuery(
+            'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table ORDER BY ORDINAL_POSITION',
+            ['table' => $table],
+            ['table' => \PDO::PARAM_STR]
+        )->fetchFirstColumn());
+    }
+
+    /**
      * Copies one batch and writes it in a single transaction.
-     * It locks the batch rows, keeps those that still match, copies their child rows and then the rows themselves, and writes.
-     * If the write changes a different number of rows than were copied, the batch is rolled back, so the archive always holds what was removed.
+     * It locks the batch rows, keeps those that still match, locks and copies their child rows, copies the rows themselves, and writes.
+     * Every row stays locked from its copy to the write, whatever the isolation level, so the archive holds the values that were removed.
+     * If a copy or the write counts differently from the rows locked, the batch is rolled back.
      *
      * @param array{lock: string, match: string, table: string, source: string, children: list<array{table: string, source: string, column: string}>} $archive
      * @param list<int>                                                                                                                               $ids
@@ -516,7 +539,16 @@ class EventLogCleanup
 
             if ([] !== $matchingIds) {
                 foreach ($archive['children'] as $child) {
-                    $this->copyRows($child['table'], $child['source'], $child['column'], $matchingIds);
+                    $lockedRows = (int) $this->connection->executeQuery(
+                        'SELECT COUNT(*) FROM '.$child['source'].' WHERE '.$child['column'].' IN (:batchIds) FOR UPDATE',
+                        ['batchIds' => $matchingIds],
+                        $batchTypes
+                    )->fetchOne();
+                    $copiedRows = $this->copyRows($child['table'], $child['source'], $child['column'], $matchingIds);
+
+                    if ($copiedRows !== $lockedRows) {
+                        throw new \RuntimeException('Archive check failed on '.$child['source'].': '.$copiedRows.' rows copied, '.$lockedRows.' expected. The batch was rolled back.');
+                    }
                 }
 
                 $copiedRows  = $this->copyRows($archive['table'], $archive['source'], 'id', $matchingIds);
