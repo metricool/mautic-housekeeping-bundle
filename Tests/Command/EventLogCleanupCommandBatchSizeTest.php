@@ -17,7 +17,7 @@ final class EventLogCleanupCommandBatchSizeTest extends TestCase
         $eventLogCleanup = $this->createMock(EventLogCleanup::class);
         $eventLogCleanup->expects($this->once())
             ->method('deleteEventLogEntries')
-            ->with(30, null, false, $this->anything(), $this->isInstanceOf(OutputInterface::class), [1, 44], 5000, null)
+            ->with(30, null, false, $this->anything(), $this->isInstanceOf(OutputInterface::class), [1, 44], 5000, null, false)
             ->willReturn('done');
 
         $commandTester = new CommandTester(new EventLogCleanupCommand($eventLogCleanup));
@@ -36,7 +36,7 @@ final class EventLogCleanupCommandBatchSizeTest extends TestCase
         $eventLogCleanup = $this->createMock(EventLogCleanup::class);
         $eventLogCleanup->expects($this->once())
             ->method('deleteEventLogEntries')
-            ->with(30, null, false, $this->anything(), $this->isInstanceOf(OutputInterface::class), null, null, null)
+            ->with(30, null, false, $this->anything(), $this->isInstanceOf(OutputInterface::class), null, null, null, false)
             ->willReturn('done');
 
         $commandTester = new CommandTester(new EventLogCleanupCommand($eventLogCleanup));
@@ -48,12 +48,12 @@ final class EventLogCleanupCommandBatchSizeTest extends TestCase
         $this->assertSame(0, $commandTester->getStatusCode());
     }
 
-    public function testPassesTheRowLimitToTheCleanup(): void
+    public function testPassesTheRowLimitAndTheArchiveToTheCleanup(): void
     {
         $eventLogCleanup = $this->createMock(EventLogCleanup::class);
         $eventLogCleanup->expects($this->once())
             ->method('deleteEventLogEntries')
-            ->with(30, null, false, $this->anything(), $this->isInstanceOf(OutputInterface::class), null, 5000, 20000)
+            ->with(30, null, false, $this->anything(), $this->isInstanceOf(OutputInterface::class), null, 5000, 20000, true)
             ->willReturn('done');
 
         $commandTester = new CommandTester(new EventLogCleanupCommand($eventLogCleanup));
@@ -62,25 +62,35 @@ final class EventLogCleanupCommandBatchSizeTest extends TestCase
             '--page-hits'  => true,
             '--batch-size' => '5000',
             '--max-rows'   => '20000',
+            '--archive'    => true,
         ]);
 
         $this->assertSame(0, $commandTester->getStatusCode());
     }
 
-    public function testRejectsARowLimitWithoutABatchSize(): void
+    /**
+     * @dataProvider needsBatchSizeProvider
+     *
+     * @param array<string, string|bool> $options
+     */
+    public function testRejectsAnOptionThatNeedsABatchSizeWithoutOne(array $options, string $error): void
     {
         $eventLogCleanup = $this->createMock(EventLogCleanup::class);
         $eventLogCleanup->expects($this->never())
             ->method('deleteEventLogEntries');
 
         $commandTester = new CommandTester(new EventLogCleanupCommand($eventLogCleanup));
-        $commandTester->execute([
-            '--page-hits' => true,
-            '--max-rows'  => '20000',
-        ]);
+        $commandTester->execute(['--page-hits' => true] + $options);
 
-        $this->assertStringContainsString('--max-rows needs --batch-size.', $commandTester->getDisplay());
+        $this->assertStringContainsString($error, $commandTester->getDisplay());
         $this->assertSame(1, $commandTester->getStatusCode());
+    }
+
+    public static function needsBatchSizeProvider(): \Generator
+    {
+        yield 'row limit' => [['--max-rows' => '20000'], '--max-rows needs --batch-size.'];
+
+        yield 'archive' => [['--archive' => true], '--archive needs --batch-size.'];
     }
 
     /**

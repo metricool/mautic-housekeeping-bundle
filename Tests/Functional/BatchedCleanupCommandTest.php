@@ -9,6 +9,7 @@ use Mautic\EmailBundle\Entity\Stat as EmailStat;
 use Mautic\EmailBundle\Entity\StatDevice;
 use Mautic\LeadBundle\Entity\LeadEventLog;
 use Mautic\PageBundle\Entity\Hit;
+use MauticPlugin\LeuchtfeuerHousekeepingBundle\Service\EventLogCleanup;
 use MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Fixtures\FixtureHelper;
 
 final class BatchedCleanupCommandTest extends MauticMysqlTestCase
@@ -124,6 +125,41 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $this->assertSame(0, $commandTester->getStatusCode());
     }
 
+    public function testArchiveKeepsACopyOfEveryDeletedRowAndOfTheRowsItsCascadeRemoves(): void
+    {
+        $this->fixtureHelper->enablePlugin();
+        $this->dropArchiveTables();
+
+        $contact = $this->fixtureHelper->createContact('batched-archive@test.com');
+        $oldDate = $this->fixtureHelper->daysAgo(400);
+
+        $closedEmail  = $this->fixtureHelper->createEmail('Batched Archive Closed Email', false);
+        $closedStat   = $this->fixtureHelper->createEmailStat($contact, $closedEmail, $oldDate);
+        $oldDevice    = $this->fixtureHelper->createEmailStatDevice($closedStat, $oldDate);
+        $recentDevice = $this->fixtureHelper->createEmailStatDevice($closedStat, $this->fixtureHelper->daysAgo(10));
+
+        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            '--days-old'    => 30,
+            '--email-stats' => true,
+            '--batch-size'  => 1,
+            '--archive'     => true,
+        ]);
+
+        $this->em->clear();
+
+        $this->assertNull($this->em->getRepository(EmailStat::class)->find($closedStat->getId()));
+        $this->assertCount(0, $this->em->getRepository(StatDevice::class)->findBy(['stat' => $closedStat->getId()]));
+        $this->assertSame([(int) $closedStat->getId()], $this->archivedIds('email_stats'));
+        $this->assertSame([(int) $oldDevice->getId(), (int) $recentDevice->getId()], $this->archivedIds('email_stats_devices'));
+
+        $output = $commandTester->getDisplay();
+        $this->assertStringContainsString('1 email_stats_devices and 1 email_stats rows have been deleted.', $output);
+        $this->assertStringContainsString('Every deleted or changed row was copied to a housekeeping_archive_ table first.', $output);
+        $this->assertSame(0, $commandTester->getStatusCode());
+
+        $this->dropArchiveTables();
+    }
+
     public function testLeadObjectKeepsOtherObjectsAcrossBatches(): void
     {
         $this->fixtureHelper->enablePlugin();
@@ -197,5 +233,20 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $this->assertStringContainsString('1 email_stats_devices', $output);
         $this->assertStringContainsString('2 email_stats ', $output);
         $this->assertSame(0, $commandTester->getStatusCode());
+    }
+
+    /**
+     * @return list<int>
+     */
+    private function archivedIds(string $table): array
+    {
+        return array_map(intval(...), $this->em->getConnection()->fetchFirstColumn('SELECT id FROM '.MAUTIC_TABLE_PREFIX.EventLogCleanup::ARCHIVE_PREFIX.$table.' ORDER BY id'));
+    }
+
+    private function dropArchiveTables(): void
+    {
+        foreach (['email_stats', 'email_stats_devices', 'email_stat_replies'] as $table) {
+            $this->em->getConnection()->executeStatement('DROP TABLE IF EXISTS '.MAUTIC_TABLE_PREFIX.EventLogCleanup::ARCHIVE_PREFIX.$table);
+        }
     }
 }

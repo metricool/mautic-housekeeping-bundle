@@ -14,6 +14,8 @@ use Symfony\Component\Console\Output\OutputInterface;
 
 final class EventLogCleanupTest extends TestCase
 {
+    private const KEYS_SQL = 'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, r.DELETE_RULE AS delete_rule FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.CONSTRAINT_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table';
+
     /**
      * @dataProvider runProvider
      *
@@ -647,9 +649,9 @@ final class EventLogCleanupTest extends TestCase
     }
 
     /**
-     * @dataProvider invalidRowLimitProvider
+     * @dataProvider invalidBatchGuardProvider
      */
-    public function testRejectsAnInvalidRowLimitBeforeTouchingTheDatabase(?int $batchSize, int $maxRows): void
+    public function testRejectsAnInvalidRowLimitOrArchiveBeforeTouchingTheDatabase(?int $batchSize, ?int $maxRows, bool $archive): void
     {
         $connection = $this->createMock(Connection::class);
         $connection->expects($this->never())
@@ -659,14 +661,152 @@ final class EventLogCleanupTest extends TestCase
 
         $this->expectException(\InvalidArgumentException::class);
 
-        $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, $batchSize, $maxRows);
+        $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, $batchSize, $maxRows, $archive);
     }
 
-    public static function invalidRowLimitProvider(): \Generator
+    public static function invalidBatchGuardProvider(): \Generator
     {
-        yield 'without a batch size' => [null, 10];
+        yield 'row limit without a batch size' => [null, 10, false];
 
-        yield 'zero' => [2, 0];
+        yield 'row limit of zero' => [2, 0, false];
+
+        yield 'archive without a batch size' => [null, null, true];
+    }
+
+    /**
+     * @dataProvider archiveProvider
+     *
+     * @param non-empty-array<string, bool>                                                    $operations
+     * @param list<array{0: string, 1: array<string, mixed>, 2: array<string, int>, 3: mixed}> $calls
+     */
+    public function testArchiveCopiesEachBatchInTheSameTransactionAsTheWrite(array $operations, array $calls, int $transactions, string $message): void
+    {
+        $connection = $this->createArchiveConnection($calls, $transactions, $transactions, 0);
+
+        $this->assertSame(
+            $message,
+            $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, $operations, $this->createStub(OutputInterface::class), null, 2, null, true)
+        );
+    }
+
+    public static function archiveProvider(): \Generator
+    {
+        $noRows      = [null, null];
+        $batchTypes  = ['batchIds' => ArrayParameterType::INTEGER];
+        $selectTypes = ['daysOld' => \PDO::PARAM_INT, 'lastId' => \PDO::PARAM_INT];
+        $writeTypes  = ['daysOld' => \PDO::PARAM_INT, 'batchIds' => ArrayParameterType::INTEGER];
+        $keysTypes   = ['table' => \PDO::PARAM_STR];
+        $statsWhere  = 'prefix_table_email_stats LEFT JOIN prefix_table_emails ON prefix_table_email_stats.email_id = prefix_table_emails.id WHERE (prefix_table_emails.is_published = 0 OR prefix_table_emails.publish_down < DATE_SUB(NOW(),INTERVAL :daysOld DAY) OR prefix_table_email_stats.email_id IS NULL) AND prefix_table_email_stats.date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY)';
+        $devices     = 'prefix_table_email_stats_devices WHERE prefix_table_email_stats_devices.date_opened < DATE_SUB(NOW(),INTERVAL :daysOld DAY)';
+
+        yield 'copies email_stats with the child rows its cascade removes, and leaves a row that stopped matching' => [
+            [EventLogCleanup::EMAIL_STATS => true],
+            [
+                ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats_devices', [], [], $noRows],
+                [self::KEYS_SQL, ['table' => 'prefix_table_email_stats_devices'], $keysTypes, []],
+                ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_email_stats_devices SELECT * FROM prefix_table_email_stats_devices LIMIT 0', [], [], null],
+                ['SELECT prefix_table_email_stats_devices.id FROM '.$devices.' AND prefix_table_email_stats_devices.id > :lastId ORDER BY prefix_table_email_stats_devices.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, []],
+                ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats', [], [], $noRows],
+                [self::KEYS_SQL, ['table' => 'prefix_table_email_stats'], $keysTypes, [
+                    ['child_table' => 'prefix_table_email_stat_replies', 'child_column' => 'stat_id', 'delete_rule' => 'CASCADE'],
+                    ['child_table' => 'prefix_table_email_stats_devices', 'child_column' => 'stat_id', 'delete_rule' => 'CASCADE'],
+                    ['child_table' => 'prefix_table_some_report', 'child_column' => 'stat_id', 'delete_rule' => 'RESTRICT'],
+                ]],
+                [self::KEYS_SQL, ['table' => 'prefix_table_email_stat_replies'], $keysTypes, []],
+                [self::KEYS_SQL, ['table' => 'prefix_table_email_stats_devices'], $keysTypes, []],
+                ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_email_stat_replies SELECT * FROM prefix_table_email_stat_replies LIMIT 0', [], [], null],
+                ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_email_stats_devices SELECT * FROM prefix_table_email_stats_devices LIMIT 0', [], [], null],
+                ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_email_stats SELECT * FROM prefix_table_email_stats LIMIT 0', [], [], null],
+                ['SELECT prefix_table_email_stats.id FROM '.$statsWhere.' AND prefix_table_email_stats.id > :lastId ORDER BY prefix_table_email_stats.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['5', '6']],
+                ['SELECT prefix_table_email_stats.id FROM prefix_table_email_stats WHERE prefix_table_email_stats.id IN (:batchIds) FOR UPDATE', ['batchIds' => [5, 6]], $batchTypes, null],
+                ['SELECT prefix_table_email_stats.id FROM '.$statsWhere.' AND prefix_table_email_stats.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [5, 6]], $writeTypes, ['5']],
+                ['INSERT INTO prefix_table_housekeeping_archive_email_stat_replies SELECT * FROM prefix_table_email_stat_replies WHERE stat_id IN (:batchIds)', ['batchIds' => [5]], $batchTypes, 0],
+                ['INSERT INTO prefix_table_housekeeping_archive_email_stats_devices SELECT * FROM prefix_table_email_stats_devices WHERE stat_id IN (:batchIds)', ['batchIds' => [5]], $batchTypes, 2],
+                ['INSERT INTO prefix_table_housekeeping_archive_email_stats SELECT * FROM prefix_table_email_stats WHERE id IN (:batchIds)', ['batchIds' => [5]], $batchTypes, 1],
+                ['DELETE LOW_PRIORITY prefix_table_email_stats FROM '.$statsWhere.' AND prefix_table_email_stats.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [5]], $writeTypes, 1],
+                ['SELECT prefix_table_email_stats.id FROM '.$statsWhere.' AND prefix_table_email_stats.id > :lastId ORDER BY prefix_table_email_stats.id LIMIT 2', ['daysOld' => 4, 'lastId' => 6], $selectTypes, []],
+            ],
+            1,
+            '0 email_stats_devices and 1 email_stats rows have been deleted. Every deleted or changed row was copied to a housekeeping_archive_ table first.',
+        ];
+
+        $tokensWhere = 'prefix_table_email_stats  WHERE date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND tokens IS NOT NULL';
+
+        yield 'copies the email_stats rows whose tokens it clears to their own archive table' => [
+            [EventLogCleanup::EMAIL_STATS_TOKENS => true],
+            [
+                ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats', [], [], $noRows],
+                ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_email_stats_tokens SELECT * FROM prefix_table_email_stats LIMIT 0', [], [], null],
+                ['SELECT prefix_table_email_stats.id FROM '.$tokensWhere.' AND prefix_table_email_stats.id > :lastId ORDER BY prefix_table_email_stats.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['7']],
+                ['SELECT prefix_table_email_stats.id FROM prefix_table_email_stats WHERE prefix_table_email_stats.id IN (:batchIds) FOR UPDATE', ['batchIds' => [7]], $batchTypes, null],
+                ['SELECT prefix_table_email_stats.id FROM '.$tokensWhere.' AND prefix_table_email_stats.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [7]], $writeTypes, ['7']],
+                ['INSERT INTO prefix_table_housekeeping_archive_email_stats_tokens SELECT * FROM prefix_table_email_stats WHERE id IN (:batchIds)', ['batchIds' => [7]], $batchTypes, 1],
+                ['UPDATE LOW_PRIORITY prefix_table_email_stats SET tokens = NULL WHERE date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND tokens IS NOT NULL AND prefix_table_email_stats.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [7]], $writeTypes, 1],
+            ],
+            1,
+            ' 1 email_stats_tokens have been set to NULL. Every deleted or changed row was copied to a housekeeping_archive_ table first.',
+        ];
+    }
+
+    public function testArchiveRollsTheBatchBackWhenTheWriteDiffersFromTheCopy(): void
+    {
+        $batchTypes = ['batchIds' => ArrayParameterType::INTEGER];
+        $writeTypes = ['daysOld' => \PDO::PARAM_INT, 'batchIds' => ArrayParameterType::INTEGER];
+        $hitsWhere  = 'prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY)';
+
+        $connection = $this->createArchiveConnection([
+            ['SELECT MIN(id), MAX(id) FROM prefix_table_page_hits', [], [], [null, null]],
+            [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], ['table' => \PDO::PARAM_STR], []],
+            ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_page_hits SELECT * FROM prefix_table_page_hits LIMIT 0', [], [], null],
+            ['SELECT prefix_table_page_hits.id FROM '.$hitsWhere.' AND prefix_table_page_hits.id > :lastId ORDER BY prefix_table_page_hits.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], ['daysOld' => \PDO::PARAM_INT, 'lastId' => \PDO::PARAM_INT], ['10', '20']],
+            ['SELECT prefix_table_page_hits.id FROM prefix_table_page_hits WHERE prefix_table_page_hits.id IN (:batchIds) FOR UPDATE', ['batchIds' => [10, 20]], $batchTypes, null],
+            ['SELECT prefix_table_page_hits.id FROM '.$hitsWhere.' AND prefix_table_page_hits.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [10, 20]], $writeTypes, ['10', '20']],
+            ['INSERT INTO prefix_table_housekeeping_archive_page_hits SELECT * FROM prefix_table_page_hits WHERE id IN (:batchIds)', ['batchIds' => [10, 20]], $batchTypes, 2],
+            ['DELETE LOW_PRIORITY prefix_table_page_hits FROM '.$hitsWhere.' AND prefix_table_page_hits.id IN (:batchIds)', ['daysOld' => 4, 'batchIds' => [10, 20]], $writeTypes, 1],
+        ], 1, 0, 1);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Archive check failed on prefix_table_page_hits: 2 rows copied, 1 written, 2 expected. The batch was rolled back.');
+
+        $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, 2, null, true);
+    }
+
+    /**
+     * @dataProvider unarchivableProvider
+     *
+     * @param list<array{0: string, 1: array<string, mixed>, 2: array<string, int>, 3: mixed}> $calls
+     */
+    public function testArchiveRejectsATableWhoseDeleteItCouldNotUndo(array $calls, string $error): void
+    {
+        $connection = $this->createArchiveConnection($calls, 0, 0, 0);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage($error);
+
+        $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, 2, null, true);
+    }
+
+    public static function unarchivableProvider(): \Generator
+    {
+        $range     = ['SELECT MIN(id), MAX(id) FROM prefix_table_page_hits', [], [], [null, null]];
+        $keysTypes = ['table' => \PDO::PARAM_STR];
+
+        yield 'a child set to NULL' => [
+            [
+                $range,
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'delete_rule' => 'SET NULL']]],
+            ],
+            'Cannot archive prefix_table_page_hits, because a delete there changes prefix_table_hit_notes through SET NULL.',
+        ];
+
+        yield 'a cascade two levels deep' => [
+            [
+                $range,
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'delete_rule' => 'CASCADE']]],
+                [self::KEYS_SQL, ['table' => 'prefix_table_hit_notes'], $keysTypes, [['child_table' => 'prefix_table_note_tags', 'child_column' => 'note_id', 'delete_rule' => 'CASCADE']]],
+            ],
+            'Cannot archive prefix_table_page_hits, because a delete there cascades from prefix_table_hit_notes to further tables.',
+        ];
     }
 
     public function testBatchSizeIsIgnoredOnDryRun(): void
@@ -692,8 +832,48 @@ final class EventLogCleanupTest extends TestCase
 
         $this->assertSame(
             '5 page_hits rows would have been deleted. This is a dry run.',
-            $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, true, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, 2, 1)
+            $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, true, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, 2, 1, true)
         );
+    }
+
+    /**
+     * Returns a connection that expects these queries in this order and answers each with the value given for it.
+     *
+     * @param list<array{0: string, 1: array<string, mixed>, 2: array<string, int>, 3: mixed}> $calls
+     */
+    private function createArchiveConnection(array $calls, int $begins, int $commits, int $rollBacks): Connection
+    {
+        $connection = $this->createMock(Connection::class);
+        $connection->expects($this->exactly($begins))
+            ->method('beginTransaction');
+        $connection->expects($this->exactly($commits))
+            ->method('commit');
+        $connection->expects($this->exactly($rollBacks))
+            ->method('rollBack');
+        $connection->expects($this->exactly(count($calls)))
+            ->method('executeQuery')
+            ->willReturnCallback(function (string $sql, array $params, array $types) use (&$calls): Result {
+                $call = array_shift($calls);
+
+                self::assertSame($call[0], $sql);
+                self::assertSame($call[1], $params);
+                self::assertSame($call[2], $types);
+
+                $result = $this->createStub(Result::class);
+                if (str_contains($sql, 'MIN(id)')) {
+                    $result->method('fetchNumeric')->willReturn($call[3]);
+                } elseif (str_contains($sql, 'information_schema')) {
+                    $result->method('fetchAllAssociative')->willReturn($call[3]);
+                } elseif (is_array($call[3])) {
+                    $result->method('fetchFirstColumn')->willReturn($call[3]);
+                } elseif (is_int($call[3])) {
+                    $result->method('rowCount')->willReturn($call[3]);
+                }
+
+                return $result;
+            });
+
+        return $connection;
     }
 
     private function createEventLogCleanup(Connection $connection): EventLogCleanup
