@@ -1,6 +1,6 @@
 # Housekeeping by Leuchtfeuer
 
-This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--lead-object` and the `housekeeping_skip_email_stats_tokens` setting.
+This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--max-rows`, `--archive`, `--lead-object` and the `housekeeping_skip_email_stats_tokens` setting.
 
 ## Overview / Purpose / Features
 This plugin provides a Mautic Housekeeping Command for database cleanup purposes.
@@ -38,6 +38,8 @@ By default, entries older than 365 days are deleted from the CampaignLeadEventLo
 -d  | --days-old                | Specifies the minimum age of the entries to be deleted. Default: 365 days
 -r  | --dry-run                 | Execute as dry run. No entries will be deleted
     | --batch-size              | Process this many rows at a time, each batch committed on its own, instead of one large transaction. Off by default.
+    | --max-rows                | Stop the run once it has deleted or changed this many rows in all. Needs --batch-size. Rows removed through a foreign key cascade are not counted. Off by default.
+    | --archive                 | Copy every row the run deletes or changes, and the rows a foreign key cascade removes with them, to a housekeeping_archive_<table> table in the same transaction. Needs --batch-size. Off by default.
 -0  | --optimize-tables         | Runs OPTIMIZE TABLE on all Mautic tables. 
 -i  | --cmp-id                  | Delete only data for a specific campaign ID from campaign_lead_event_log
 -c  | --campaign-lead           | Only entries from the campaign_lead_event_log table will be deleted
@@ -60,6 +62,8 @@ housekeeping_skip_email_stats_tokens | Set to true to stop saving tokens in emai
 
 ### Deleting huge ammounts of data
 - Use `--batch-size` (for example `--batch-size=5000`), so that each batch is committed on its own. If a run stops, what it already committed stays deleted, and running it again carries on. `--campaign-lead` works out which rows to keep for every batch, so use a larger batch size there.
+- Add `--max-rows` a little above what `--dry-run` counts, so a wrong `--days-old` cannot delete far more than you expect. The run then stops at the limit and says so in its output. The rest waits for the next run.
+- Add `--archive` to keep what the run removes, so it can be put back. The archive tables have the same columns as their source table, with no keys, and a generated column such as `email_stats.generated_sent_date` becomes a plain one. If the write and the copy of a batch ever differ, the batch is rolled back and the run stops. The command never empties the archive tables. After a Mautic upgrade changes a table's columns, the next run with `--archive` stops with an error until its archive table is renamed or dropped. A table whose delete would set another table's column to NULL is rejected, and so is one whose cascade does not come through a single key on its id.
 - It might happen that the plugin fails to delete if the data is too large to handle. In that case: Create the following bash script and iterate through the deletion day by day:
 ```
 #!/bin/sh

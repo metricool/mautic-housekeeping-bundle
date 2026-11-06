@@ -38,6 +38,8 @@ class EventLogCleanupCommand extends Command
                     ),
                     new InputOption('dry-run', 'r', InputOption::VALUE_NONE, 'Do a dry run without actually deleting anything.'),
                     new InputOption('batch-size', null, InputOption::VALUE_REQUIRED, 'Process this many rows at a time, each batch committed on its own, instead of one large transaction. Off by default. Has no effect on a dry run.'),
+                    new InputOption('max-rows', null, InputOption::VALUE_REQUIRED, 'Stop the run once it has deleted or changed this many rows in all. Needs --batch-size. Rows removed through a foreign key cascade are not counted. Off by default. Has no effect on a dry run.'),
+                    new InputOption('archive', null, InputOption::VALUE_NONE, 'Copy every row the run deletes or changes, and the rows a foreign key cascade removes with them, to a '.EventLogCleanup::ARCHIVE_PREFIX.'<table> table in the same transaction, so they can be put back. Needs --batch-size. The archive tables are kept until you drop them. Has no effect on a dry run.'),
                     new InputOption('campaign-lead', 'c', InputOption::VALUE_NONE, 'Purge only Campaign Lead Event Log Records'),
                     new InputOption('lead', 'l', InputOption::VALUE_NONE, 'Purge only Lead Event Log Records'),
                     new InputOption('lead-object', null, InputOption::VALUE_REQUIRED, 'Comma-separated list of lead_event_log objects to purge (e.g., segment,import). All other objects are kept. Implies --lead.'),
@@ -63,6 +65,12 @@ class EventLogCleanupCommand extends Command
 
                 Process large tables in batches, each committed on its own:
                 <info>php %command.full_name% --page-hits --batch-size=5000</info>
+
+                Stop the run once it has deleted 100000 rows, a little above what the dry run counted:
+                <info>php %command.full_name% --page-hits --batch-size=5000 --max-rows=100000</info>
+
+                Keep a copy of every row the run removes, in housekeeping_archive_ tables, so it can be put back:
+                <info>php %command.full_name% --page-hits --batch-size=5000 --archive</info>
 
                 If you run --optimize-tables on its own, with no other cleanup flag, no data is deleted. Only the table optimization runs:
                 <info>php %command.full_name% --optimize-tables</info>
@@ -99,12 +107,23 @@ class EventLogCleanupCommand extends Command
 
     protected function execute(InputInterface $input, OutputInterface $output): int
     {
-        $batchSize = $input->getOption('batch-size');
+        $batchSize = $this->parsePositiveInteger($input, 'batch-size');
+        $maxRows   = $this->parsePositiveInteger($input, 'max-rows');
 
-        if (null !== $batchSize && (!ctype_digit((string) $batchSize) || 0 === (int) $batchSize)) {
-            $output->writeln('<error>--batch-size must be a whole number greater than 0.</error>');
+        if (false === $batchSize || false === $maxRows) {
+            $output->writeln('<error>--'.(false === $batchSize ? 'batch-size' : 'max-rows').' must be a whole number greater than 0.</error>');
 
             return Command::FAILURE;
+        }
+
+        $archive = (bool) $input->getOption('archive');
+
+        foreach (['max-rows' => null !== $maxRows, 'archive' => $archive] as $option => $given) {
+            if ($given && null === $batchSize) {
+                $output->writeln('<error>--'.$option.' needs --batch-size.</error>');
+
+                return Command::FAILURE;
+            }
         }
 
         $daysOld                              = (int) $input->getOption('days-old');
@@ -157,7 +176,9 @@ class EventLogCleanupCommand extends Command
                     $operations,
                     $output,
                     $excludeEmails,
-                    null === $batchSize ? null : (int) $batchSize
+                    $batchSize,
+                    $maxRows,
+                    $archive
                 );
             } catch (\Throwable $e) {
                 $output->writeln(sprintf('<error>Deletion of Log Rows failed because of database error: %s</error>', $e->getMessage()));
@@ -216,6 +237,24 @@ class EventLogCleanupCommand extends Command
         }
 
         return array_values($ids);
+    }
+
+    /**
+     * Returns null when the option is not given, and false when it is not a whole number greater than 0.
+     */
+    private function parsePositiveInteger(InputInterface $input, string $option): int|false|null
+    {
+        $rawValue = $input->getOption($option);
+
+        if (null === $rawValue) {
+            return null;
+        }
+
+        if (!ctype_digit((string) $rawValue) || 0 === (int) $rawValue) {
+            return false;
+        }
+
+        return (int) $rawValue;
     }
 
     /**
