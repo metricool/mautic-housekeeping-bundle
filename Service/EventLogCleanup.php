@@ -428,7 +428,8 @@ class EventLogCleanup
      * Creates the archive tables an operation needs, and returns the statements each batch uses to copy its rows.
      * A delete also copies the rows of each child table that a foreign key cascade empties with it.
      * The archive tables are made with CREATE TABLE ... SELECT, so they have the same columns as their source, with no keys, and generated columns become plain ones.
-     * Rows are copied by column position, so an archive table whose column names or order differ from its source is rejected.
+     * Rows are copied by column position, so an archive table whose columns differ from its source in name, order, type, size, nullability,
+     * character set or collation is rejected. Without strict SQL mode a narrower column would cut values with only a warning.
      *
      * @return array{lock: string, match: string, table: string, source: string, children: list<array{table: string, source: string, column: string}>}
      */
@@ -500,12 +501,14 @@ class EventLogCleanup
     }
 
     /**
+     * Returns each column's name, type with its size, nullability, character set and collation, in table order.
+     *
      * @return list<string>
      */
     private function columnsOf(string $table): array
     {
         return array_map(strval(...), $this->connection->executeQuery(
-            'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table ORDER BY ORDINAL_POSITION',
+            "SELECT CONCAT_WS(' ', COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, CHARACTER_SET_NAME, COLLATION_NAME) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table ORDER BY ORDINAL_POSITION",
             ['table' => $table],
             ['table' => \PDO::PARAM_STR]
         )->fetchFirstColumn());

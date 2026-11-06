@@ -14,7 +14,7 @@ use Symfony\Component\Console\Output\OutputInterface;
 
 final class EventLogCleanupTest extends TestCase
 {
-    private const COLUMNS_SQL = 'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table ORDER BY ORDINAL_POSITION';
+    private const COLUMNS_SQL = "SELECT CONCAT_WS(' ', COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, CHARACTER_SET_NAME, COLLATION_NAME) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table ORDER BY ORDINAL_POSITION";
     private const KEYS_SQL    = 'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column, r.DELETE_RULE AS delete_rule FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.CONSTRAINT_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table';
 
     /**
@@ -889,6 +889,17 @@ final class EventLogCleanupTest extends TestCase
                 ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_page_hits SELECT * FROM prefix_table_page_hits LIMIT 0', [], [], null],
                 [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_page_hits'], $keysTypes, ['id', 'email_id', 'date_hit']],
                 [self::COLUMNS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, ['id', 'date_hit', 'email_id']],
+            ],
+            'Cannot archive into prefix_table_housekeeping_archive_page_hits, because its columns no longer match prefix_table_page_hits. Rename or drop it, and the next run makes a new one.',
+        ];
+
+        yield 'an archive table with a narrower column' => [
+            [
+                $range,
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, []],
+                ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_page_hits SELECT * FROM prefix_table_page_hits LIMIT 0', [], [], null],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_page_hits'], $keysTypes, ['id bigint unsigned NO', 'url varchar(191) YES utf8mb4 utf8mb4_unicode_ci']],
+                [self::COLUMNS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, ['id bigint unsigned NO', 'url text YES utf8mb4 utf8mb4_unicode_ci']],
             ],
             'Cannot archive into prefix_table_housekeeping_archive_page_hits, because its columns no longer match prefix_table_page_hits. Rename or drop it, and the next run makes a new one.',
         ];
