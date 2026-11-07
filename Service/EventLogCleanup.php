@@ -366,7 +366,8 @@ class EventLogCleanup
      * Under a row limit, a batch selects no more rows than the limit has left, and the write never goes past it.
      * Each batch is locked, checked and written by its ID range and its conditions, never by a list of IDs:
      * a long list of IDs can make MySQL give up the range analysis on a table with many indexes and scan the whole table.
-     * A batch covers at most MAX_ID_SPAN IDs, so a batch of rows spread thinly among rows the conditions keep does not lock a long stretch of them.
+     * A selected batch is written in windows of fewer than MAX_ID_SPAN IDs, so rows spread thinly among rows the conditions keep
+     * do not lock a long stretch of them, and every window of one select is written before the next select.
      */
     private function runOperationInBatches(string $operation, int $batchSize, OutputInterface $output): int
     {
@@ -409,21 +410,49 @@ class EventLogCleanup
                 break;
             }
 
-            $ids    = array_map(intval(...), $ids);
-            $window = array_values(array_filter($ids, static fn (int $id): bool => $id < $ids[0] + self::MAX_ID_SPAN));
-            $range  = ['fromId' => $window[0], 'toId' => $window[count($window) - 1]];
+            $ids = array_map(intval(...), $ids);
 
-            $writtenRows = $this->writeBatch($operation, $statements, $range);
-            $affectedRows += $writtenRows;
+            foreach ($this->windowsOf($ids) as $window) {
+                $range       = ['fromId' => $window[0], 'toId' => $window[count($window) - 1]];
+                $writtenRows = $this->writeBatch($operation, $statements, $range);
+                $affectedRows += $writtenRows;
+                $lastId = $range['toId'];
 
-            if (null !== $this->rowsLeft) {
-                $this->rowsLeft = max(0, $this->rowsLeft - $writtenRows);
+                if (null !== $this->rowsLeft) {
+                    $this->rowsLeft = max(0, $this->rowsLeft - $writtenRows);
+                }
+
+                if (0 === $this->rowsLeft) {
+                    break;
+                }
             }
-
-            $lastId = $range['toId'];
-        } while ((count($window) < count($ids) || count($ids) === $limit) && 0 !== $this->rowsLeft);
+        } while (count($ids) === $limit && 0 !== $this->rowsLeft);
 
         return $affectedRows;
+    }
+
+    /**
+     * Splits IDs in ascending order into windows that each span fewer than MAX_ID_SPAN IDs, so one select feeds every window.
+     *
+     * @param list<int> $ids
+     *
+     * @return list<non-empty-list<int>>
+     */
+    private function windowsOf(array $ids): array
+    {
+        $windows = [];
+
+        foreach ($ids as $id) {
+            $last = array_key_last($windows);
+
+            if (null === $last || $id >= $windows[$last][0] + self::MAX_ID_SPAN) {
+                $windows[] = [$id];
+            } else {
+                $windows[$last][] = $id;
+            }
+        }
+
+        return $windows;
     }
 
     /**

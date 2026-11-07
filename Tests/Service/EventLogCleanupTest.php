@@ -451,7 +451,7 @@ final class EventLogCleanupTest extends TestCase
      * @param non-empty-array<string, bool>                                                                            $operations
      * @param list<array{0: string, 1: array<string, int|list<int>>, 2: array<string, int>, 3: list<string|null>|int}> $calls
      */
-    public function testBatchSizeProcessesRowsInBatches(array $operations, array $calls, string $message, ?int $maxRows = null): void
+    public function testBatchSizeProcessesRowsInBatches(array $operations, array $calls, string $message, ?int $maxRows = null, int $batchSize = 2): void
     {
         $batches    = count(array_filter($calls, static fn (array $call): bool => str_contains($call[0], 'FOR UPDATE')));
         $connection = $this->createMock(Connection::class);
@@ -490,7 +490,7 @@ final class EventLogCleanupTest extends TestCase
 
         $this->assertSame(
             $message,
-            $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, $operations, $this->createStub(OutputInterface::class), null, 2, $maxRows)
+            $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, $operations, $this->createStub(OutputInterface::class), null, $batchSize, $maxRows)
         );
     }
 
@@ -685,11 +685,24 @@ final class EventLogCleanupTest extends TestCase
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '50010']],
                 [$matchHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 10], $writeTypes, ['10']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 10], $writeTypes, 1],
-                [$selectHits, ['daysOld' => 4, 'lastId' => 10], $selectTypes, ['50010']],
                 [$matchHits, ['daysOld' => 4, 'fromId' => 50010, 'toId' => 50010], $writeTypes, ['50010']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 50010, 'toId' => 50010], $writeTypes, 1],
+                [$selectHits, ['daysOld' => 4, 'lastId' => 50010], $selectTypes, []],
             ],
             '2 page_hits rows have been deleted.',
+        ];
+
+        yield 'stops between the windows of one select once the limit is reached' => [
+            [EventLogCleanup::PAGE_HITS => true],
+            [
+                [$rangeHits, [], [], $noRows],
+                [str_replace('LIMIT 2', 'LIMIT 3', $selectHits), ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20', '50010']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, ['10', '15', '20']],
+                [$deleteHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, 3],
+            ],
+            '3 page_hits rows have been deleted.'.sprintf($limitReached, 3),
+            3,
+            3,
         ];
     }
 
