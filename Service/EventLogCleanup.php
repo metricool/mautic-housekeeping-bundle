@@ -28,6 +28,7 @@ class EventLogCleanup
     private const EMAIL_STATS_DEVICES = 'email_stats_devices';
     public const PAGE_HITS            = 'page_hits';
     public const ARCHIVE_PREFIX       = 'housekeeping_archive_';
+    private const ID_RANGE_TYPES      = ['fromId' => \PDO::PARAM_INT, 'toId' => \PDO::PARAM_INT];
 
     /**
      * The date column of each table whose IDs grow with that date. The campaign log is left out, because its date_triggered can be set long after the row is created.
@@ -361,7 +362,10 @@ class EventLogCleanup
      * The write repeats the conditions, so a row that stopped matching after the select stays.
      * The select stops where the rows newer than the cutoff begin, so the last batch does not read on to the end of the table.
      * A row older than the cutoff with an ID past that point waits for a later run.
-     * Under a row limit, a batch selects no more rows than the limit has left, so the run never writes past it.
+     * Under a row limit, a batch selects no more rows than the limit has left. Without the archive, a row that starts to match between
+     * a batch's select and its write is written too, so such a run can pass the limit by those rows. With the archive it cannot.
+     * The write and the archive statements find their rows by the batch's ID range and its conditions, never by a list of IDs:
+     * a long list of IDs can make MySQL give up the range analysis on a table with many indexes and scan the whole table.
      * With the archive on, each batch is copied and written in one transaction.
      */
     private function runOperationInBatches(string $operation, int $batchSize, OutputInterface $output): int
@@ -371,11 +375,12 @@ class EventLogCleanup
         $template     = str_replace(self::PREFIX, $this->dbPrefix, $this->queriesTemplate[$operation]);
         $firstNewerId = $this->findFirstNewerId($operation, $table);
         $idBound      = null === $firstNewerId ? '' : ' AND '.$idColumn.' < '.$firstNewerId;
+        $idRange      = ' AND '.$idColumn.' BETWEEN :fromId AND :toId';
         $selectSql    = 'SELECT '.$idColumn.' FROM '.str_replace(self::SET, '', $template).' AND '.$idColumn.' > :lastId'.$idBound.' ORDER BY '.$idColumn.' LIMIT ';
-        $writeSql     = 'DELETE LOW_PRIORITY '.$table.' FROM '.$template.' AND '.$idColumn.' IN (:batchIds)';
+        $writeSql     = 'DELETE LOW_PRIORITY '.$table.' FROM '.$template.$idRange;
 
         if (array_key_exists($operation, $this->update)) {
-            $writeSql = 'UPDATE LOW_PRIORITY '.str_replace(self::SET, $this->update[$operation], $template).' AND '.$idColumn.' IN (:batchIds)';
+            $writeSql = 'UPDATE LOW_PRIORITY '.str_replace(self::SET, $this->update[$operation], $template).$idRange;
         }
 
         $archive = $this->archive ? $this->prepareArchive($operation, $table, $template) : null;
@@ -400,16 +405,17 @@ class EventLogCleanup
                 break;
             }
 
-            $ids = array_map(intval(...), $ids);
+            $ids   = array_map(intval(...), $ids);
+            $range = ['fromId' => min($ids), 'toId' => max($ids)];
 
             if (null === $archive) {
                 $writtenRows = $this->connection->executeQuery(
                     $writeSql,
-                    $this->params[$operation] + ['batchIds' => $ids],
-                    $this->types[$operation] + ['batchIds' => ArrayParameterType::INTEGER]
+                    $this->params[$operation] + $range,
+                    $this->types[$operation] + self::ID_RANGE_TYPES
                 )->rowCount();
             } else {
-                $writtenRows = $this->archiveAndWrite($operation, $writeSql, $archive, $ids);
+                $writtenRows = $this->archiveAndWrite($operation, $writeSql, $archive, $range);
             }
 
             $affectedRows += $writtenRows;
@@ -431,11 +437,12 @@ class EventLogCleanup
      * Rows are copied by column position, so an archive table whose columns differ from its source in name, order, type, size, nullability,
      * character set or collation is rejected. Without strict SQL mode a narrower column would cut values with only a warning.
      *
-     * @return array{lock: string, match: string, table: string, source: string, children: list<array{table: string, source: string, column: string}>}
+     * @return array{match: string, copy: string, source: string, children: list<array{table: string, source: string, column: string}>}
      */
     private function prepareArchive(string $operation, string $table, string $template): array
     {
         $idColumn = $table.'.id';
+        $rows     = str_replace(self::SET, '', $template).' AND '.$idColumn.' BETWEEN :fromId AND :toId';
         $children = [];
 
         if (!array_key_exists($operation, $this->update)) {
@@ -459,9 +466,8 @@ class EventLogCleanup
         }
 
         return [
-            'lock'     => 'SELECT '.$idColumn.' FROM '.$table.' WHERE '.$idColumn.' IN (:batchIds) FOR UPDATE',
-            'match'    => 'SELECT '.$idColumn.' FROM '.str_replace(self::SET, '', $template).' AND '.$idColumn.' IN (:batchIds)',
-            'table'    => $archiveTable,
+            'match'    => 'SELECT '.$idColumn.' FROM '.$rows.' FOR UPDATE',
+            'copy'     => 'INSERT INTO '.$archiveTable.' SELECT '.$table.'.* FROM '.$rows,
             'source'   => $table,
             'children' => $children,
         ];
@@ -516,27 +522,23 @@ class EventLogCleanup
 
     /**
      * Copies one batch and writes it in a single transaction.
-     * It locks the batch rows, keeps those that still match, locks and copies their child rows, copies the rows themselves, and writes.
+     * It locks the rows of the batch's ID range that still match, locks and copies their child rows, copies the rows themselves, and writes.
      * Every row stays locked from its copy to the write, whatever the isolation level, so the archive holds the values that were removed.
      * If a copy or the write counts differently from the rows locked, the batch is rolled back.
      *
-     * @param array{lock: string, match: string, table: string, source: string, children: list<array{table: string, source: string, column: string}>} $archive
-     * @param list<int>                                                                                                                               $ids
+     * @param array{match: string, copy: string, source: string, children: list<array{table: string, source: string, column: string}>} $archive
+     * @param array{fromId: int, toId: int}                                                                                            $range
      */
-    private function archiveAndWrite(string $operation, string $writeSql, array $archive, array $ids): int
+    private function archiveAndWrite(string $operation, string $writeSql, array $archive, array $range): int
     {
         $batchTypes = ['batchIds' => ArrayParameterType::INTEGER];
+        $params     = $this->params[$operation] + $range;
+        $types      = $this->types[$operation] + self::ID_RANGE_TYPES;
 
         $this->connection->beginTransaction();
 
         try {
-            $this->connection->executeQuery($archive['lock'], ['batchIds' => $ids], $batchTypes);
-
-            $matchingIds = array_map(intval(...), $this->connection->executeQuery(
-                $archive['match'],
-                $this->params[$operation] + ['batchIds' => $ids],
-                $this->types[$operation] + $batchTypes
-            )->fetchFirstColumn());
+            $matchingIds = array_map(intval(...), $this->connection->executeQuery($archive['match'], $params, $types)->fetchFirstColumn());
 
             $writtenRows = 0;
 
@@ -554,12 +556,8 @@ class EventLogCleanup
                     }
                 }
 
-                $copiedRows  = $this->copyRows($archive['table'], $archive['source'], 'id', $matchingIds);
-                $writtenRows = $this->connection->executeQuery(
-                    $writeSql,
-                    $this->params[$operation] + ['batchIds' => $matchingIds],
-                    $this->types[$operation] + $batchTypes
-                )->rowCount();
+                $copiedRows  = $this->connection->executeQuery($archive['copy'], $params, $types)->rowCount();
+                $writtenRows = $this->connection->executeQuery($writeSql, $params, $types)->rowCount();
 
                 if ($copiedRows !== count($matchingIds) || $writtenRows !== $copiedRows) {
                     throw new \RuntimeException('Archive check failed on '.$archive['source'].': '.$copiedRows.' rows copied, '.$writtenRows.' written, '.count($matchingIds).' expected. The batch was rolled back.');
