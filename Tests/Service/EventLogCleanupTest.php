@@ -453,11 +453,14 @@ final class EventLogCleanupTest extends TestCase
      */
     public function testBatchSizeProcessesRowsInBatches(array $operations, array $calls, string $message, ?int $maxRows = null): void
     {
+        $batches    = count(array_filter($calls, static fn (array $call): bool => str_contains($call[0], 'FOR UPDATE')));
         $connection = $this->createMock(Connection::class);
-        $connection->expects($this->never())
+        $connection->expects($this->exactly($batches))
             ->method('beginTransaction');
-        $connection->expects($this->never())
+        $connection->expects($this->exactly($batches))
             ->method('commit');
+        $connection->expects($this->never())
+            ->method('rollBack');
         $connection->expects($this->exactly(count($calls)))
             ->method('executeQuery')
             ->willReturnCallback(function (string $sql, array $params, array $types) use (&$calls): Result {
@@ -502,6 +505,7 @@ final class EventLogCleanupTest extends TestCase
         $probeHits  = 'SELECT date_hit >= DATE_SUB(NOW(),INTERVAL :daysOld DAY) FROM prefix_table_page_hits WHERE id >= :probeId ORDER BY id LIMIT 1';
         $selectHits ='SELECT prefix_table_page_hits.id FROM prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_page_hits.id > :lastId ORDER BY prefix_table_page_hits.id LIMIT 2';
         $deleteHits = 'DELETE LOW_PRIORITY prefix_table_page_hits FROM prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_page_hits.id BETWEEN :fromId AND :toId';
+        $matchHits  = 'SELECT prefix_table_page_hits.id FROM prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_page_hits.id BETWEEN :fromId AND :toId ORDER BY prefix_table_page_hits.id FOR UPDATE';
 
         yield 'searches for where the newer rows begin and stops selecting there' => [
             [EventLogCleanup::PAGE_HITS => true],
@@ -512,6 +516,7 @@ final class EventLogCleanupTest extends TestCase
                 [$probeHits, ['daysOld' => 4, 'probeId' => 5], $probeTypes, 0],
                 [$probeHits, ['daysOld' => 4, 'probeId' => 6], $probeTypes, 1],
                 ['SELECT prefix_table_page_hits.id FROM prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_page_hits.id > :lastId AND prefix_table_page_hits.id < 6 ORDER BY prefix_table_page_hits.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['3']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 3, 'toId' => 3], $writeTypes, ['3']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 3, 'toId' => 3], $writeTypes, 1],
             ],
             '1 page_hits rows have been deleted.',
@@ -535,8 +540,10 @@ final class EventLogCleanupTest extends TestCase
             [
                 [$rangeHits, [], [], $noRows],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, ['10', '20']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, 2],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 20], $selectTypes, ['30']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 30, 'toId' => 30], $writeTypes, ['30']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 30, 'toId' => 30], $writeTypes, 1],
             ],
             '3 page_hits rows have been deleted.',
@@ -547,6 +554,7 @@ final class EventLogCleanupTest extends TestCase
             [
                 [$rangeHits, [], [], $noRows],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, ['10', '20']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, 2],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 20], $selectTypes, []],
             ],
@@ -558,6 +566,7 @@ final class EventLogCleanupTest extends TestCase
             [
                 [$rangeHits, [], [], $noRows],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, ['10']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, 1],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 20], $selectTypes, []],
             ],
@@ -578,6 +587,7 @@ final class EventLogCleanupTest extends TestCase
             [
                 ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats', [], [], $noRows],
                 ['SELECT prefix_table_email_stats.id FROM prefix_table_email_stats  WHERE date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND tokens IS NOT NULL AND prefix_table_email_stats.id > :lastId ORDER BY prefix_table_email_stats.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['7']],
+                ['SELECT prefix_table_email_stats.id FROM prefix_table_email_stats  WHERE date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND tokens IS NOT NULL AND prefix_table_email_stats.id BETWEEN :fromId AND :toId ORDER BY prefix_table_email_stats.id FOR UPDATE', ['daysOld' => 4, 'fromId' => 7, 'toId' => 7], $writeTypes, ['7']],
                 ['UPDATE LOW_PRIORITY prefix_table_email_stats SET tokens = NULL WHERE date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND tokens IS NOT NULL AND prefix_table_email_stats.id BETWEEN :fromId AND :toId', ['daysOld' => 4, 'fromId' => 7, 'toId' => 7], $writeTypes, 1],
             ],
             ' 1 email_stats_tokens have been set to NULL.',
@@ -590,6 +600,7 @@ final class EventLogCleanupTest extends TestCase
                 ['SELECT prefix_table_email_stats_devices.id FROM prefix_table_email_stats_devices WHERE prefix_table_email_stats_devices.date_opened < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats_devices.id > :lastId ORDER BY prefix_table_email_stats_devices.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, []],
                 ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats', [], [], $noRows],
                 ['SELECT prefix_table_email_stats.id FROM prefix_table_email_stats LEFT JOIN prefix_table_emails ON prefix_table_email_stats.email_id = prefix_table_emails.id WHERE (prefix_table_emails.is_published = 0 OR prefix_table_emails.publish_down < DATE_SUB(NOW(),INTERVAL :daysOld DAY) OR prefix_table_email_stats.email_id IS NULL) AND prefix_table_email_stats.date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats.id > :lastId ORDER BY prefix_table_email_stats.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['5']],
+                ['SELECT prefix_table_email_stats.id FROM prefix_table_email_stats LEFT JOIN prefix_table_emails ON prefix_table_email_stats.email_id = prefix_table_emails.id WHERE (prefix_table_emails.is_published = 0 OR prefix_table_emails.publish_down < DATE_SUB(NOW(),INTERVAL :daysOld DAY) OR prefix_table_email_stats.email_id IS NULL) AND prefix_table_email_stats.date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats.id BETWEEN :fromId AND :toId ORDER BY prefix_table_email_stats.id FOR UPDATE', ['daysOld' => 4, 'fromId' => 5, 'toId' => 5], $writeTypes, ['5']],
                 ['DELETE LOW_PRIORITY prefix_table_email_stats FROM prefix_table_email_stats LEFT JOIN prefix_table_emails ON prefix_table_email_stats.email_id = prefix_table_emails.id WHERE (prefix_table_emails.is_published = 0 OR prefix_table_emails.publish_down < DATE_SUB(NOW(),INTERVAL :daysOld DAY) OR prefix_table_email_stats.email_id IS NULL) AND prefix_table_email_stats.date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats.id BETWEEN :fromId AND :toId', ['daysOld' => 4, 'fromId' => 5, 'toId' => 5], $writeTypes, 1],
             ],
             '0 email_stats_devices and 1 email_stats rows have been deleted.',
@@ -603,8 +614,10 @@ final class EventLogCleanupTest extends TestCase
             [
                 [$rangeHits, [], [], $noRows],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, ['10', '20']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, 2],
                 [$selectHitsUpToOne, ['daysOld' => 4, 'lastId' => 20], $selectTypes, ['30']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 30, 'toId' => 30], $writeTypes, ['30']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 30, 'toId' => 30], $writeTypes, 1],
             ],
             '3 page_hits rows have been deleted.'.sprintf($limitReached, 3),
@@ -616,8 +629,10 @@ final class EventLogCleanupTest extends TestCase
             [
                 [$rangeHits, [], [], $noRows],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, ['10']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, 1],
                 [$selectHitsUpToOne, ['daysOld' => 4, 'lastId' => 20], $selectTypes, ['30']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 30, 'toId' => 30], $writeTypes, ['30']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 30, 'toId' => 30], $writeTypes, 1],
             ],
             '2 page_hits rows have been deleted.'.sprintf($limitReached, 2),
@@ -629,6 +644,7 @@ final class EventLogCleanupTest extends TestCase
             [
                 ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats_devices', [], [], $noRows],
                 ['SELECT prefix_table_email_stats_devices.id FROM prefix_table_email_stats_devices WHERE prefix_table_email_stats_devices.date_opened < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats_devices.id > :lastId ORDER BY prefix_table_email_stats_devices.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['3', '4']],
+                ['SELECT prefix_table_email_stats_devices.id FROM prefix_table_email_stats_devices WHERE prefix_table_email_stats_devices.date_opened < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats_devices.id BETWEEN :fromId AND :toId ORDER BY prefix_table_email_stats_devices.id FOR UPDATE', ['daysOld' => 4, 'fromId' => 3, 'toId' => 4], $writeTypes, ['3', '4']],
                 ['DELETE LOW_PRIORITY prefix_table_email_stats_devices FROM prefix_table_email_stats_devices WHERE prefix_table_email_stats_devices.date_opened < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND prefix_table_email_stats_devices.id BETWEEN :fromId AND :toId', ['daysOld' => 4, 'fromId' => 3, 'toId' => 4], $writeTypes, 2],
             ],
             '2 email_stats_devices and 0 email_stats rows have been deleted.'.sprintf($limitReached, 2),
@@ -640,13 +656,59 @@ final class EventLogCleanupTest extends TestCase
             [
                 [$rangeHits, [], [], $noRows],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, ['10', '20']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, 2],
                 [$selectHits, ['daysOld' => 4, 'lastId' => 20], $selectTypes, ['30']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 30, 'toId' => 30], $writeTypes, ['30']],
                 [$deleteHits, ['daysOld' => 4, 'fromId' => 30, 'toId' => 30], $writeTypes, 1],
             ],
             '3 page_hits rows have been deleted.',
             5,
         ];
+
+        yield 'stops at the limit when a row starts to match between the select and the lock' => [
+            [EventLogCleanup::PAGE_HITS => true],
+            [
+                [$rangeHits, [], [], $noRows],
+                [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '20']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, ['10', '15', '20']],
+                [$deleteHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 15], $writeTypes, 2],
+            ],
+            '2 page_hits rows have been deleted.'.sprintf($limitReached, 2),
+            2,
+        ];
+
+        yield 'keeps each batch within 50,000 IDs' => [
+            [EventLogCleanup::PAGE_HITS => true],
+            [
+                [$rangeHits, [], [], $noRows],
+                [$selectHits, ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['10', '50010']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 10], $writeTypes, ['10']],
+                [$deleteHits, ['daysOld' => 4, 'fromId' => 10, 'toId' => 10], $writeTypes, 1],
+                [$selectHits, ['daysOld' => 4, 'lastId' => 10], $selectTypes, ['50010']],
+                [$matchHits, ['daysOld' => 4, 'fromId' => 50010, 'toId' => 50010], $writeTypes, ['50010']],
+                [$deleteHits, ['daysOld' => 4, 'fromId' => 50010, 'toId' => 50010], $writeTypes, 1],
+            ],
+            '2 page_hits rows have been deleted.',
+        ];
+    }
+
+    public function testPlainBatchRollsBackWhenTheWriteDiffersFromTheLock(): void
+    {
+        $writeTypes = ['daysOld' => \PDO::PARAM_INT, 'fromId' => \PDO::PARAM_INT, 'toId' => \PDO::PARAM_INT];
+        $hitsWhere  = 'prefix_table_page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY)';
+
+        $connection = $this->createArchiveConnection([
+            ['SELECT MIN(id), MAX(id) FROM prefix_table_page_hits', [], [], [null, null]],
+            ['SELECT prefix_table_page_hits.id FROM '.$hitsWhere.' AND prefix_table_page_hits.id > :lastId ORDER BY prefix_table_page_hits.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], ['daysOld' => \PDO::PARAM_INT, 'lastId' => \PDO::PARAM_INT], ['10', '20']],
+            ['SELECT prefix_table_page_hits.id FROM '.$hitsWhere.' AND prefix_table_page_hits.id BETWEEN :fromId AND :toId ORDER BY prefix_table_page_hits.id FOR UPDATE', ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, ['10', '20']],
+            ['DELETE LOW_PRIORITY prefix_table_page_hits FROM '.$hitsWhere.' AND prefix_table_page_hits.id BETWEEN :fromId AND :toId', ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, 1],
+        ], 1, 0, 1);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Batch check failed on prefix_table_page_hits: 1 rows written, 2 expected. The batch was rolled back.');
+
+        $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, [EventLogCleanup::PAGE_HITS => true], $this->createStub(OutputInterface::class), null, 2);
     }
 
     /**
@@ -728,7 +790,7 @@ final class EventLogCleanupTest extends TestCase
                 [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_email_stats'], $keysTypes, ['id', 'email_id']],
                 [self::COLUMNS_SQL, ['table' => 'prefix_table_email_stats'], $keysTypes, ['id', 'email_id']],
                 ['SELECT prefix_table_email_stats.id FROM '.$statsWhere.' AND prefix_table_email_stats.id > :lastId ORDER BY prefix_table_email_stats.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['5', '6']],
-                ['SELECT prefix_table_email_stats.id FROM '.$statsWhere.' AND prefix_table_email_stats.id BETWEEN :fromId AND :toId FOR UPDATE', ['daysOld' => 4, 'fromId' => 5, 'toId' => 6], $writeTypes, ['5']],
+                ['SELECT prefix_table_email_stats.id FROM '.$statsWhere.' AND prefix_table_email_stats.id BETWEEN :fromId AND :toId ORDER BY prefix_table_email_stats.id FOR UPDATE', ['daysOld' => 4, 'fromId' => 5, 'toId' => 6], $writeTypes, ['5']],
                 ['SELECT COUNT(*) FROM prefix_table_email_stat_replies WHERE stat_id IN (:batchIds) FOR UPDATE', ['batchIds' => [5]], $batchTypes, '0'],
                 ['INSERT INTO prefix_table_housekeeping_archive_email_stat_replies SELECT * FROM prefix_table_email_stat_replies WHERE stat_id IN (:batchIds)', ['batchIds' => [5]], $batchTypes, 0],
                 ['SELECT COUNT(*) FROM prefix_table_email_stats_devices WHERE stat_id IN (:batchIds) FOR UPDATE', ['batchIds' => [5]], $batchTypes, '2'],
@@ -751,7 +813,7 @@ final class EventLogCleanupTest extends TestCase
                 [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_email_stats_tokens'], ['table' => \PDO::PARAM_STR], ['id', 'tokens']],
                 [self::COLUMNS_SQL, ['table' => 'prefix_table_email_stats'], ['table' => \PDO::PARAM_STR], ['id', 'tokens']],
                 ['SELECT prefix_table_email_stats.id FROM '.$tokensWhere.' AND prefix_table_email_stats.id > :lastId ORDER BY prefix_table_email_stats.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, ['7']],
-                ['SELECT prefix_table_email_stats.id FROM '.$tokensWhere.' AND prefix_table_email_stats.id BETWEEN :fromId AND :toId FOR UPDATE', ['daysOld' => 4, 'fromId' => 7, 'toId' => 7], $writeTypes, ['7']],
+                ['SELECT prefix_table_email_stats.id FROM '.$tokensWhere.' AND prefix_table_email_stats.id BETWEEN :fromId AND :toId ORDER BY prefix_table_email_stats.id FOR UPDATE', ['daysOld' => 4, 'fromId' => 7, 'toId' => 7], $writeTypes, ['7']],
                 ['INSERT INTO prefix_table_housekeeping_archive_email_stats_tokens SELECT prefix_table_email_stats.* FROM '.$tokensWhere.' AND prefix_table_email_stats.id BETWEEN :fromId AND :toId', ['daysOld' => 4, 'fromId' => 7, 'toId' => 7], $writeTypes, 1],
                 ['UPDATE LOW_PRIORITY prefix_table_email_stats SET tokens = NULL WHERE date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND tokens IS NOT NULL AND prefix_table_email_stats.id BETWEEN :fromId AND :toId', ['daysOld' => 4, 'fromId' => 7, 'toId' => 7], $writeTypes, 1],
             ],
@@ -789,7 +851,7 @@ final class EventLogCleanupTest extends TestCase
         ];
         $batch      = [
             ['SELECT prefix_table_page_hits.id FROM '.$hitsWhere.' AND prefix_table_page_hits.id > :lastId ORDER BY prefix_table_page_hits.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], ['daysOld' => \PDO::PARAM_INT, 'lastId' => \PDO::PARAM_INT], ['10', '20']],
-            ['SELECT prefix_table_page_hits.id FROM '.$hitsWhere.' AND prefix_table_page_hits.id BETWEEN :fromId AND :toId FOR UPDATE', ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, ['10', '20']],
+            ['SELECT prefix_table_page_hits.id FROM '.$hitsWhere.' AND prefix_table_page_hits.id BETWEEN :fromId AND :toId ORDER BY prefix_table_page_hits.id FOR UPDATE', ['daysOld' => 4, 'fromId' => 10, 'toId' => 20], $writeTypes, ['10', '20']],
         ];
 
         yield 'the write removes fewer rows than were copied' => [
