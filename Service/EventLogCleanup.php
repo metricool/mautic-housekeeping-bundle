@@ -28,6 +28,8 @@ class EventLogCleanup
     private const EMAIL_STATS_DEVICES = 'email_stats_devices';
     public const PAGE_HITS            = 'page_hits';
     public const ARCHIVE_PREFIX       = 'housekeeping_archive_';
+    private const ID_RANGE_TYPES      = ['fromId' => \PDO::PARAM_INT, 'toId' => \PDO::PARAM_INT];
+    private const MAX_ID_SPAN         = 50000;
 
     /**
      * The date column of each table whose IDs grow with that date. The campaign log is left out, because its date_triggered can be set long after the row is created.
@@ -361,8 +363,11 @@ class EventLogCleanup
      * The write repeats the conditions, so a row that stopped matching after the select stays.
      * The select stops where the rows newer than the cutoff begin, so the last batch does not read on to the end of the table.
      * A row older than the cutoff with an ID past that point waits for a later run.
-     * Under a row limit, a batch selects no more rows than the limit has left, so the run never writes past it.
-     * With the archive on, each batch is copied and written in one transaction.
+     * Under a row limit, a batch selects no more rows than the limit has left, and the write never goes past it.
+     * Each batch is locked, checked and written by its ID range and its conditions, never by a list of IDs:
+     * a long list of IDs can make MySQL give up the range analysis on a table with many indexes and scan the whole table.
+     * A selected batch is written in windows of fewer than MAX_ID_SPAN IDs, so rows spread thinly among rows the conditions keep
+     * do not lock a long stretch of them, and every window of one select is written before the next select.
      */
     private function runOperationInBatches(string $operation, int $batchSize, OutputInterface $output): int
     {
@@ -371,18 +376,23 @@ class EventLogCleanup
         $template     = str_replace(self::PREFIX, $this->dbPrefix, $this->queriesTemplate[$operation]);
         $firstNewerId = $this->findFirstNewerId($operation, $table);
         $idBound      = null === $firstNewerId ? '' : ' AND '.$idColumn.' < '.$firstNewerId;
+        $idRange      = ' AND '.$idColumn.' BETWEEN :fromId AND :toId';
+        $rows         = str_replace(self::SET, '', $template).$idRange;
         $selectSql    = 'SELECT '.$idColumn.' FROM '.str_replace(self::SET, '', $template).' AND '.$idColumn.' > :lastId'.$idBound.' ORDER BY '.$idColumn.' LIMIT ';
-        $writeSql     = 'DELETE LOW_PRIORITY '.$table.' FROM '.$template.' AND '.$idColumn.' IN (:batchIds)';
+        $statements   = [
+            'table'   => $table,
+            'match'   => 'SELECT '.$idColumn.' FROM '.$rows.' ORDER BY '.$idColumn.' FOR UPDATE',
+            'write'   => 'DELETE LOW_PRIORITY '.$table.' FROM '.$template.$idRange,
+            'archive' => $this->archive ? $this->prepareArchive($operation, $table, $rows) : null,
+        ];
 
         if (array_key_exists($operation, $this->update)) {
-            $writeSql = 'UPDATE LOW_PRIORITY '.str_replace(self::SET, $this->update[$operation], $template).' AND '.$idColumn.' IN (:batchIds)';
+            $statements['write'] = 'UPDATE LOW_PRIORITY '.str_replace(self::SET, $this->update[$operation], $template).$idRange;
         }
-
-        $archive = $this->archive ? $this->prepareArchive($operation, $table, $template) : null;
 
         if ($output->isVerbose()) {
             $output->writeln($selectSql.$batchSize);
-            $output->writeln($writeSql);
+            $output->writeln($statements['write']);
         }
 
         $affectedRows = 0;
@@ -402,26 +412,47 @@ class EventLogCleanup
 
             $ids = array_map(intval(...), $ids);
 
-            if (null === $archive) {
-                $writtenRows = $this->connection->executeQuery(
-                    $writeSql,
-                    $this->params[$operation] + ['batchIds' => $ids],
-                    $this->types[$operation] + ['batchIds' => ArrayParameterType::INTEGER]
-                )->rowCount();
-            } else {
-                $writtenRows = $this->archiveAndWrite($operation, $writeSql, $archive, $ids);
+            foreach ($this->windowsOf($ids) as $window) {
+                $range       = ['fromId' => $window[0], 'toId' => $window[count($window) - 1]];
+                $writtenRows = $this->writeBatch($operation, $statements, $range);
+                $affectedRows += $writtenRows;
+                $lastId = $range['toId'];
+
+                if (null !== $this->rowsLeft) {
+                    $this->rowsLeft = max(0, $this->rowsLeft - $writtenRows);
+                }
+
+                if (0 === $this->rowsLeft) {
+                    break;
+                }
             }
-
-            $affectedRows += $writtenRows;
-
-            if (null !== $this->rowsLeft) {
-                $this->rowsLeft = max(0, $this->rowsLeft - $writtenRows);
-            }
-
-            $lastId = max($ids);
         } while (count($ids) === $limit && 0 !== $this->rowsLeft);
 
         return $affectedRows;
+    }
+
+    /**
+     * Splits IDs in ascending order into windows that each span fewer than MAX_ID_SPAN IDs, so one select feeds every window.
+     *
+     * @param list<int> $ids
+     *
+     * @return list<non-empty-list<int>>
+     */
+    private function windowsOf(array $ids): array
+    {
+        $windows = [];
+
+        foreach ($ids as $id) {
+            $last = array_key_last($windows);
+
+            if (null === $last || $id >= $windows[$last][0] + self::MAX_ID_SPAN) {
+                $windows[] = [$id];
+            } else {
+                $windows[$last][] = $id;
+            }
+        }
+
+        return $windows;
     }
 
     /**
@@ -431,11 +462,10 @@ class EventLogCleanup
      * Rows are copied by column position, so an archive table whose columns differ from its source in name, order, type, size, nullability,
      * character set or collation is rejected. Without strict SQL mode a narrower column would cut values with only a warning.
      *
-     * @return array{lock: string, match: string, table: string, source: string, children: list<array{table: string, source: string, column: string}>}
+     * @return array{copy: string, children: list<array{table: string, source: string, column: string}>}
      */
-    private function prepareArchive(string $operation, string $table, string $template): array
+    private function prepareArchive(string $operation, string $table, string $rows): array
     {
-        $idColumn = $table.'.id';
         $children = [];
 
         if (!array_key_exists($operation, $this->update)) {
@@ -459,10 +489,7 @@ class EventLogCleanup
         }
 
         return [
-            'lock'     => 'SELECT '.$idColumn.' FROM '.$table.' WHERE '.$idColumn.' IN (:batchIds) FOR UPDATE',
-            'match'    => 'SELECT '.$idColumn.' FROM '.str_replace(self::SET, '', $template).' AND '.$idColumn.' IN (:batchIds)',
-            'table'    => $archiveTable,
-            'source'   => $table,
+            'copy'     => 'INSERT INTO '.$archiveTable.' SELECT '.$table.'.* FROM '.$rows,
             'children' => $children,
         ];
     }
@@ -515,33 +542,37 @@ class EventLogCleanup
     }
 
     /**
-     * Copies one batch and writes it in a single transaction.
-     * It locks the batch rows, keeps those that still match, locks and copies their child rows, copies the rows themselves, and writes.
+     * Locks, checks and writes one batch in a single transaction, and with the archive on copies it first.
+     * It locks the rows of the batch's ID range that still match, in ID order. If more match than the row limit has left,
+     * the range ends at the last row the limit allows, so a row that started to match after the select cannot take the run past it.
+     * With the archive on it then locks and copies their child rows and copies the rows themselves.
      * Every row stays locked from its copy to the write, whatever the isolation level, so the archive holds the values that were removed.
-     * If a copy or the write counts differently from the rows locked, the batch is rolled back.
+     * If the write or a copy counts differently from the rows locked, the batch is rolled back.
      *
-     * @param array{lock: string, match: string, table: string, source: string, children: list<array{table: string, source: string, column: string}>} $archive
-     * @param list<int>                                                                                                                               $ids
+     * @param array{table: string, match: string, write: string, archive: array{copy: string, children: list<array{table: string, source: string, column: string}>}|null} $statements
+     * @param array{fromId: int, toId: int}                                                                                                                               $range
      */
-    private function archiveAndWrite(string $operation, string $writeSql, array $archive, array $ids): int
+    private function writeBatch(string $operation, array $statements, array $range): int
     {
         $batchTypes = ['batchIds' => ArrayParameterType::INTEGER];
+        $params     = $this->params[$operation] + $range;
+        $types      = $this->types[$operation] + self::ID_RANGE_TYPES;
+        $archive    = $statements['archive'];
 
         $this->connection->beginTransaction();
 
         try {
-            $this->connection->executeQuery($archive['lock'], ['batchIds' => $ids], $batchTypes);
+            $matchingIds = array_map(intval(...), $this->connection->executeQuery($statements['match'], $params, $types)->fetchFirstColumn());
 
-            $matchingIds = array_map(intval(...), $this->connection->executeQuery(
-                $archive['match'],
-                $this->params[$operation] + ['batchIds' => $ids],
-                $this->types[$operation] + $batchTypes
-            )->fetchFirstColumn());
+            if (null !== $this->rowsLeft && count($matchingIds) > $this->rowsLeft) {
+                $matchingIds    = array_slice($matchingIds, 0, $this->rowsLeft);
+                $params['toId'] = $matchingIds[count($matchingIds) - 1];
+            }
 
             $writtenRows = 0;
 
             if ([] !== $matchingIds) {
-                foreach ($archive['children'] as $child) {
+                foreach (null === $archive ? [] : $archive['children'] as $child) {
                     $lockedRows = (int) $this->connection->executeQuery(
                         'SELECT COUNT(*) FROM '.$child['source'].' WHERE '.$child['column'].' IN (:batchIds) FOR UPDATE',
                         ['batchIds' => $matchingIds],
@@ -554,15 +585,15 @@ class EventLogCleanup
                     }
                 }
 
-                $copiedRows  = $this->copyRows($archive['table'], $archive['source'], 'id', $matchingIds);
-                $writtenRows = $this->connection->executeQuery(
-                    $writeSql,
-                    $this->params[$operation] + ['batchIds' => $matchingIds],
-                    $this->types[$operation] + $batchTypes
-                )->rowCount();
+                $copiedRows  = null === $archive ? null : $this->connection->executeQuery($archive['copy'], $params, $types)->rowCount();
+                $writtenRows = $this->connection->executeQuery($statements['write'], $params, $types)->rowCount();
 
-                if ($copiedRows !== count($matchingIds) || $writtenRows !== $copiedRows) {
-                    throw new \RuntimeException('Archive check failed on '.$archive['source'].': '.$copiedRows.' rows copied, '.$writtenRows.' written, '.count($matchingIds).' expected. The batch was rolled back.');
+                if (null !== $copiedRows && ($copiedRows !== count($matchingIds) || $writtenRows !== $copiedRows)) {
+                    throw new \RuntimeException('Archive check failed on '.$statements['table'].': '.$copiedRows.' rows copied, '.$writtenRows.' written, '.count($matchingIds).' expected. The batch was rolled back.');
+                }
+
+                if ($writtenRows !== count($matchingIds)) {
+                    throw new \RuntimeException('Batch check failed on '.$statements['table'].': '.$writtenRows.' rows written, '.count($matchingIds).' expected. The batch was rolled back.');
                 }
             }
 
