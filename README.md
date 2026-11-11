@@ -1,6 +1,6 @@
 # Housekeeping by Leuchtfeuer
 
-This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--max-rows`, `--archive`, `--lead-object` and the `housekeeping_skip_email_stats_tokens` setting.
+This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--max-rows`, `--archive`, `--lead-object`, `--ip-addresses`, `--ip-slice` and the `housekeeping_skip_email_stats_tokens` setting.
 
 ## Overview / Purpose / Features
 This plugin provides a Mautic Housekeeping Command for database cleanup purposes.
@@ -49,6 +49,8 @@ By default, entries older than 365 days are deleted from the CampaignLeadEventLo
     | --lead-object             | Only these objects from lead_event_log will be deleted, the rest are kept. Accepts comma-separated list (e.g., segment,import). Implies --lead.
 -p  | --page-hits               | Only entries from the page_hits table will be deleted.
     | --exclude-emails          | Exclude specific email IDs from event log cleanup. Accepts comma-separated list of email IDs (e.g., 1,44,61). Works with --email-stats, --email-stats-tokens and --page-hits.
+    | --ip-addresses            | Delete the rows of ip_addresses that no other table uses. Needs --batch-size. Not part of the default cleanup.
+    | --ip-slice                | With --ip-addresses, check only slice N of M of the IDs, for example 5/31. Off by default.
 ```
 
 ### Config parameters
@@ -80,6 +82,40 @@ $TIME -ao $OUT sudo -u www-data php $DOCROOT/bin/console leu:hou $OP -d $i 2>&1 
 sleep 2
 done
 ```
+
+### Unused IP addresses
+`--ip-addresses` deletes the rows of `ip_addresses` that no other table uses. It is not part of the default cleanup. `--days-old` has no effect on it, because the table has no date column. It needs `--batch-size`, and MySQL 8.0 or MariaDB 10.6 or newer. If binary logging is on, `binlog_format` must be `ROW` or `MIXED`, because each batch runs at READ COMMITTED.
+
+An address counts as used when one of these tables points at it:
+- Any table with a foreign key to `ip_addresses`, whatever the key does on delete. The command reads the keys each time it starts, so tables that Mautic or a plugin add later count too.
+- Any `housekeeping_archive_` table with the same column, so archived rows can always be put back. The command adds an index named `housekeeping_ip_id` to these tables when they have none, so they are quick to check. This takes a few seconds once per table and changes no rows. A dry run does it too. If you rename an archive table, keep your Mautic table prefix and `housekeeping_archive_` at the start of its name.
+- Any other table with the same column and an index on it.
+
+The command stops with an error before it deletes anything when no foreign key points at `ip_addresses`, when a key comes from another database, or when another table has the same column with no foreign key and no index. Add an index to that table or drop it, then run the command again.
+
+How a run works:
+- It leaves out the newest 1000000 IDs, because Mautic saves a new address a moment before the row that uses it.
+- It reads the IDs in small steps, so no query runs for long.
+- Each batch is locked, checked again and deleted in its own short transaction. It never waits for a row that Mautic has locked. An address that a visitor or a worker starts to use during the run is kept, and a later run checks it again. The output says how many were kept. `--batch-size=1000` keeps each lock short.
+- Each batch runs at READ COMMITTED, so its delete only holds up new rows that point at an address in the batch. Mautic can keep adding other rows to the tables that use an address.
+- When `--max-rows` stops a run early, the output says the ID it stopped at, so you know which IDs it did not check.
+- If a table with the same column is added or dropped during the run, the run stops with an error. Batches already done stay done. Run it again.
+- With `--archive`, each deleted address is copied to `housekeeping_archive_ip_addresses` in the same transaction. To put one back, copy its row from there into `ip_addresses`. New addresses never reuse those IDs.
+- Do not also run Mautic's `mautic:unusedip:delete`. It does not know about the archive tables.
+- Deleted rows free space inside the table, but the database file does not shrink. Do not run `--optimize-tables` to get it back, because it rebuilds every table.
+
+One slice a night:
+Checking every address of a large table can take hours. `--ip-slice=N/M` checks one slice instead. The IDs are cut into blocks of 100000. Slice N takes block N, then every Mth block after it. Run a different N each night, and the whole table is checked every M nights:
+```
+bin/console leuchtfeuer:housekeeping --ip-addresses --ip-slice=5/31 --batch-size=1000 --max-rows=200000 --archive
+```
+In a crontab, write each `%` as `\%`. This value picks the next slice every day, so each slice runs every 31 days:
+```
+--ip-slice=$(( $(date +\%s) / 86400 \% 31 + 1 ))/31
+```
+A run without `--ip-slice` checks the whole table in one go. If it stops, run it again. It starts from the first ID again.
+
+`--dry-run` counts what a run would delete, in the same small steps and outside any transaction. It reads as much as a real run, so try it on one slice first.
 
 ### Author
 Leuchtfeuer Digital Marketing GmbH
