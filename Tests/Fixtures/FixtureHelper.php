@@ -200,12 +200,36 @@ final class FixtureHelper
         return (new \DateTime())->modify("-{$days} days");
     }
 
-    private function createIpAddress(string $ip = '127.0.0.1'): IpAddress
+    public function createIpAddress(string $ip = '127.0.0.1'): IpAddress
     {
         $ipAddress = new IpAddress($ip);
         $this->em->persist($ipAddress);
         $this->em->flush();
 
         return $ipAddress;
+    }
+
+    /**
+     * Links an IP address to a contact, which Mautic stores in lead_ips_xref.
+     *
+     * @param Lead      $contact the contact that used the address
+     * @param IpAddress $ip      the address to link
+     */
+    public function addIpAddressToContact(Lead $contact, IpAddress $ip): void
+    {
+        $contact->addIpAddress($ip);
+        $this->em->persist($contact);
+        $this->em->flush();
+    }
+
+    /**
+     * Saves an IP address row with this ID, so a test can place it anywhere in the ID range.
+     *
+     * @param int    $id the ID the new row gets
+     * @param string $ip the address the new row holds
+     */
+    public function createIpAddressWithId(int $id, string $ip = '192.0.2.1'): void
+    {
+        $this->em->getConnection()->insert(MAUTIC_TABLE_PREFIX.'ip_addresses', ['id' => $id, 'ip_address' => $ip, 'ip_details' => 'a:0:{}']);
     }
 }
