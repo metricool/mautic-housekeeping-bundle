@@ -57,18 +57,24 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
 
     /**
      * Leaves the newest addresses alone, even when no table uses them.
+     * The highest ID depends on the tests run before, because a rollback does not take back an auto-increment value, so the expected message is worked out from it.
      */
     public function testKeepsTheNewestAddresses(): void
     {
-        $unused = $this->fixtureHelper->createIpAddress('192.0.2.12');
+        $unusedId = (int) $this->fixtureHelper->createIpAddress('192.0.2.12')->getId();
+        $upper    = $this->maxAddressId() - EventLogCleanup::IP_KEEP_NEWEST;
 
         $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
             '--ip-addresses' => true,
             '--batch-size'   => 10,
         ]);
 
-        $this->assertTrue($this->addressExists((int) $unused->getId()));
-        $this->assertStringContainsString('checked no IDs', $commandTester->getDisplay());
+        $this->assertGreaterThan($upper, $unusedId);
+        $this->assertTrue($this->addressExists($unusedId));
+        $this->assertStringContainsString(
+            $upper >= 1 ? 'checked every ID up to '.$upper.' and left out the newest '.EventLogCleanup::IP_KEEP_NEWEST.' IDs.' : 'checked no IDs',
+            $commandTester->getDisplay()
+        );
         $this->assertSame(0, $commandTester->getStatusCode());
     }
 
