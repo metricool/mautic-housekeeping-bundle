@@ -89,9 +89,8 @@ done
 An address counts as used when one of these tables points at it:
 - Any table with a foreign key to `ip_addresses`, whatever the key does on delete. The command reads the keys each time it starts, so tables that Mautic or a plugin add later count too.
 - Any `housekeeping_archive_` table with the same column, so archived rows can always be put back. The command adds an index named `housekeeping_ip_id` to these tables when they have none, so they are quick to check. This takes a few seconds once per table and changes no rows. A dry run does it too. If you rename an archive table, keep your Mautic table prefix and `housekeeping_archive_` at the start of its name.
-- Any other table with the same column and an index on it.
 
-The command stops with an error before it deletes anything when no foreign key points at `ip_addresses`, when a key comes from another database, or when another table has the same column with no foreign key and no index. Add an index to that table or drop it, then run the command again.
+The command stops with an error before it deletes any address when no foreign key points at `ip_addresses`, when a key comes from another database, or when any other table has the same column with no foreign key. A new row in such a table does not wait for the delete, so the address it points at could be deleted under it. Add a foreign key from that column to `ip_addresses`, or drop the table, then run the command again. Other cleanups in the same run, such as `--page-hits`, run first, so their deletes are already done when this error stops the run.
 
 How a run works:
 - It leaves out the newest 1000000 IDs, because Mautic saves a new address a moment before the row that uses it.
@@ -99,7 +98,7 @@ How a run works:
 - Each batch is locked, checked again and deleted in its own short transaction. It never waits for a row that Mautic has locked. An address that a visitor or a worker starts to use during the run is kept, and a later run checks it again. The output says how many were kept. `--batch-size=1000` keeps each lock short.
 - Each batch runs at READ COMMITTED, so its delete only holds up new rows that point at an address in the batch. Mautic can keep adding other rows to the tables that use an address.
 - When `--max-rows` stops a run early, the output says the ID it stopped at, so you know which IDs it did not check.
-- If a table with the same column is added or dropped during the run, the run stops with an error. Batches already done stay done. Run it again.
+- If a foreign key to `ip_addresses`, or a table with the same column, is added or dropped during the run, the run stops with an error. Batches already done stay done. Run it again.
 - With `--archive`, each deleted address is copied to `housekeeping_archive_ip_addresses` in the same transaction. To put one back, copy its row from there into `ip_addresses`. New addresses never reuse those IDs.
 - Do not also run Mautic's `mautic:unusedip:delete`. It does not know about the archive tables.
 - Deleted rows free space inside the table, but the database file does not shrink. Do not run `--optimize-tables` to get it back, because it rebuilds every table.
