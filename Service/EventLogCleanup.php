@@ -6,6 +6,7 @@ namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Service;
 
 use Doctrine\DBAL\ArrayParameterType;
 use Doctrine\DBAL\Connection;
+use Doctrine\DBAL\Exception\RetryableException;
 use MauticPlugin\LeuchtfeuerHousekeepingBundle\Integration\Config;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Console\Output\OutputInterface;
@@ -30,6 +31,15 @@ class EventLogCleanup
     public const ARCHIVE_PREFIX       = 'housekeeping_archive_';
     private const ID_RANGE_TYPES      = ['fromId' => \PDO::PARAM_INT, 'toId' => \PDO::PARAM_INT];
     private const MAX_ID_SPAN         = 50000;
+
+    public const IP_ADDRESSES          = 'ip_addresses';
+    public const IP_KEEP_NEWEST        = 1000000;
+    public const IP_SLICE_BLOCK        = 100000;
+    private const IP_SCAN_SPAN         = 10000;
+    private const IP_INDEX_PREFIX      = 'housekeeping_';
+    private const IP_LOCK_WAIT_TIMEOUT = 30;
+    private const IP_WINDOW_TYPES      = ['lastId' => \PDO::PARAM_INT, 'toId' => \PDO::PARAM_INT];
+    private const IP_ISOLATION         = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED';
 
     /**
      * The date column of each table whose IDs grow with that date. The campaign log is left out, because its date_triggered can be set long after the row is created.
@@ -124,6 +134,12 @@ class EventLogCleanup
 
     private bool $archive = false;
 
+    private int $ipSlice = 1;
+
+    private int $ipSlices = 1;
+
+    private string $ipMessage = '';
+
     public function __construct(private readonly Connection $connection, ?string $dbPrefix, private readonly Config $config, private readonly LoggerInterface $logger)
     {
         $this->dbPrefix = $dbPrefix ?? '';
@@ -140,10 +156,27 @@ class EventLogCleanup
     }
 
     /**
+     * Limits the ip_addresses cleanup to one slice of its ID blocks.
+     *
+     * @param int $slice  the slice to check, from 1 to $slices
+     * @param int $slices how many slices share the ID blocks, at least 1
+     */
+    public function setIpSlice(int $slice, int $slices): void
+    {
+        if ($slice < 1 || $slice > $slices) {
+            throw new \InvalidArgumentException('An ip_addresses slice must be N of M, with N from 1 to M.');
+        }
+
+        $this->ipSlice  = $slice;
+        $this->ipSlices = $slices;
+    }
+
+    /**
      * A run with $maxRows stops once it has deleted or changed that many rows in all, and later operations do not start.
      * Rows removed through a foreign key cascade are not counted.
      * With $archive, each batch copies its rows, and the child rows a cascade removes with them, to housekeeping_archive_ tables in the same transaction as the write.
      * Both need $batchSize, and a dry run ignores them.
+     * The ip_addresses cleanup runs last, outside the transactions of the other operations, and needs $batchSize outside a dry run.
      *
      * @param non-empty-array<string, bool> $operations
      * @param list<int>|null                $excludeEmailIds
@@ -155,6 +188,14 @@ class EventLogCleanup
         }
 
         $this->setUpBatchGuards($dryRun, $batchSize, $maxRows, $archive);
+
+        $ipAddresses     = (bool) ($operations[self::IP_ADDRESSES] ?? false);
+        $this->ipMessage = '';
+        unset($operations[self::IP_ADDRESSES]);
+
+        if ($ipAddresses && !$dryRun && null === $batchSize) {
+            throw new \InvalidArgumentException('The ip_addresses cleanup needs a batch size.');
+        }
 
         if (self::DEFAULT_DAYS !== $daysOld) {
             foreach ($this->params as $index => $item) {
@@ -215,7 +256,7 @@ class EventLogCleanup
             self::PAGE_HITS            => 0,
         ];
 
-        $useSingleTransaction = $dryRun || null === $batchSize;
+        $useSingleTransaction = ($dryRun || null === $batchSize) && in_array(true, $operations, true);
 
         if ($useSingleTransaction) {
             $this->connection->beginTransaction();
@@ -278,6 +319,11 @@ class EventLogCleanup
             }
         }
 
+        if ($ipAddresses) {
+            $operations[self::IP_ADDRESSES] = true;
+            $result[self::IP_ADDRESSES]     = 0 === $this->rowsLeft ? 0 : $this->cleanIpAddresses($dryRun, $batchSize ?? 0, $output);
+        }
+
         $operationsResult = [
             'delete' => [],
             'update' => [],
@@ -310,6 +356,8 @@ class EventLogCleanup
         if (0 === $this->rowsLeft) {
             $message .= ' Stopped at the limit of '.$maxRows.' rows for this run. Any rows left wait for the next run.';
         }
+
+        $message .= $this->ipMessage;
 
         return $message;
     }
@@ -667,6 +715,363 @@ class EventLogCleanup
             ['daysOld' => $this->params[$operation]['daysOld'], 'probeId' => $id],
             ['daysOld' => \PDO::PARAM_INT, 'probeId' => \PDO::PARAM_INT]
         )->fetchOne();
+    }
+
+    /**
+     * Deletes the ip_addresses rows that no table uses in this run's slice, or counts them on a dry run.
+     *
+     * @param bool            $dryRun    true to count only
+     * @param int             $batchSize the most rows one batch deletes, unused on a dry run
+     * @param OutputInterface $output    prints the statements and one line per block when verbose
+     *
+     * @return int how many rows were deleted, or would be on a dry run
+     */
+    private function cleanIpAddresses(bool $dryRun, int $batchSize, OutputInterface $output): int
+    {
+        if ($this->connection->isTransactionActive()) {
+            throw new \LogicException('The ip_addresses cleanup cannot run inside an open transaction.');
+        }
+
+        $table = $this->dbPrefix.self::IP_ADDRESSES;
+        $copy  = $this->archive ? $this->prepareArchive(self::IP_ADDRESSES, $table, $table.' WHERE '.$table.'.id IN (:batchIds)')['copy'] : null;
+        $found = $this->findAddressUsers($table, $output);
+
+        $unused = implode(' AND ', array_map(static function (string $user): string {
+            [$userTable, $column] = explode('.', $user, 2);
+
+            return 'NOT EXISTS (SELECT 1 FROM '.$userTable.' u WHERE u.'.$column.' = a.id)';
+        }, $found['users']));
+
+        $max    = $this->connection->executeQuery('SELECT MAX(id) FROM '.$table, [], [])->fetchOne();
+        $upper  = null === $max ? 0 : (int) $max - self::IP_KEEP_NEWEST;
+        $ranges = $this->ipRanges($upper);
+
+        $selectSql  = 'SELECT a.id FROM '.$table.' a WHERE a.id > :lastId AND a.id <= :toId AND '.$unused.' ORDER BY a.id LIMIT ';
+        $countSql   = 'SELECT COUNT(*) FROM '.$table.' a WHERE a.id > :lastId AND a.id <= :toId AND '.$unused;
+        $statements = [
+            'table'  => $table,
+            'lock'   => 'SELECT id FROM '.$table.' WHERE id IN (:batchIds) ORDER BY id FOR UPDATE SKIP LOCKED',
+            'check'  => 'SELECT a.id FROM '.$table.' a WHERE a.id IN (:batchIds) AND '.$unused.' ORDER BY a.id',
+            'copy'   => $copy,
+            'delete' => 'DELETE LOW_PRIORITY FROM '.$table.' WHERE '.$table.'.id IN (:batchIds)',
+        ];
+
+        if ($output->isVerbose()) {
+            if ($upper >= 1) {
+                $output->writeln('Checking ip_addresses IDs up to '.$upper.', slice '.$this->ipSlice.' of '.$this->ipSlices.', in blocks of '.self::IP_SLICE_BLOCK.'. The newest '.self::IP_KEEP_NEWEST.' IDs are left out.');
+            }
+
+            $printed = $dryRun ? [$countSql] : array_filter([$selectSql.$batchSize, self::IP_ISOLATION, $statements['lock'], $statements['check'], $statements['copy'], $statements['delete']]);
+
+            foreach ($printed as $sql) {
+                $output->writeln($sql);
+            }
+        }
+
+        $total   = 0;
+        $kept    = 0;
+        $reached = 0;
+
+        foreach ($ranges as [$from, $to]) {
+            if (0 === $this->rowsLeft) {
+                break;
+            }
+
+            $rangeTotal = 0;
+            $rangeKept  = 0;
+            $lastId     = $from - 1;
+
+            while ($lastId < $to && 0 !== $this->rowsLeft) {
+                $window = ['lastId' => $lastId, 'toId' => min($lastId + self::IP_SCAN_SPAN, $to)];
+
+                if ($dryRun) {
+                    $rangeTotal += (int) $this->connection->executeQuery($countSql, $window, self::IP_WINDOW_TYPES)->fetchOne();
+                    $lastId = $window['toId'];
+
+                    continue;
+                }
+
+                do {
+                    $limit = null === $this->rowsLeft ? $batchSize : min($batchSize, $this->rowsLeft);
+                    $ids   = array_map(intval(...), $this->connection->executeQuery($selectSql.$limit, $window, self::IP_WINDOW_TYPES)->fetchFirstColumn());
+
+                    if ([] !== $ids) {
+                        $written = $this->writeIpBatch($statements, $ids, $found);
+                        $rangeTotal += $written;
+                        $rangeKept += count($ids) - $written;
+
+                        if (null !== $this->rowsLeft) {
+                            $this->rowsLeft = max(0, $this->rowsLeft - $written);
+                        }
+                    }
+
+                    $window['lastId'] = [] !== $ids && count($ids) === $limit ? $ids[count($ids) - 1] : $window['toId'];
+                } while ($window['lastId'] < $window['toId'] && 0 !== $this->rowsLeft);
+
+                $lastId = $window['lastId'];
+            }
+
+            if ($output->isVerbose()) {
+                $output->writeln('IDs '.$from.' to '.$lastId.': '.($dryRun ? $rangeTotal.' would be deleted.' : $rangeTotal.' deleted, '.$rangeKept.' kept for a later run.'));
+            }
+
+            $total += $rangeTotal;
+            $kept += $rangeKept;
+            $reached = $lastId;
+        }
+
+        if ($upper < 1) {
+            $this->ipMessage = ' The ip_addresses cleanup checked no IDs, because none is older than the newest '.self::IP_KEEP_NEWEST.'.';
+        } elseif ([] !== $ranges && $reached < $ranges[array_key_last($ranges)][1]) {
+            $this->ipMessage = ' The ip_addresses cleanup stopped at ID '.$reached.', before it checked '.(1 === $this->ipSlices ? 'every ID' : 'all of slice '.$this->ipSlice.' of '.$this->ipSlices.' of the IDs').' up to '.$upper.'.';
+        } elseif (1 === $this->ipSlices) {
+            $this->ipMessage = ' The ip_addresses cleanup checked every ID up to '.$upper.' and left out the newest '.self::IP_KEEP_NEWEST.' IDs.';
+        } else {
+            $this->ipMessage = ' The ip_addresses cleanup checked slice '.$this->ipSlice.' of '.$this->ipSlices.' of the IDs up to '.$upper.' and left out the newest '.self::IP_KEEP_NEWEST.' IDs.';
+        }
+
+        if (!$dryRun && $kept > 0) {
+            $this->ipMessage .= ' '.$kept.' ip_addresses rows were in use or locked when their batch ran, so they were kept for a later run.';
+        }
+
+        return $total;
+    }
+
+    /**
+     * Finds every table column that can hold an ip_addresses ID, and adds an index to each archive table column that has none.
+     *
+     * @param string          $table  the ip_addresses table with its prefix
+     * @param OutputInterface $output prints the users and each added index when verbose
+     *
+     * @return array{columns: list<string>, users: list<string>} the key column names, and each user as table.column in sorted order
+     */
+    private function findAddressUsers(string $table, OutputInterface $output): array
+    {
+        $plainName = '/\A[A-Za-z0-9_$]+\z/';
+        $keys      = $this->connection->executeQuery(
+            'SELECT k.TABLE_SCHEMA = k.REFERENCED_TABLE_SCHEMA AS same_database, k.TABLE_SCHEMA AS child_schema, k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column FROM information_schema.KEY_COLUMN_USAGE k WHERE k.REFERENCED_TABLE_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table',
+            ['table' => $table],
+            ['table' => \PDO::PARAM_STR]
+        )->fetchAllAssociative();
+
+        if ([] === $keys) {
+            throw new \RuntimeException('Cannot clean '.$table.', because no foreign key points at it, so the tables that use an address cannot be found.');
+        }
+
+        $keyUsers = [];
+        $columns  = [];
+
+        foreach ($keys as $key) {
+            if (1 !== (int) $key['same_database']) {
+                throw new \RuntimeException('Cannot clean '.$table.', because '.$key['child_schema'].'.'.$key['child_table'].' in another database points at it.');
+            }
+
+            if ('id' !== $key['referenced_column']) {
+                throw new \RuntimeException('Cannot clean '.$table.', because the key from '.$key['child_table'].'.'.$key['child_column'].' points at its '.$key['referenced_column'].' column instead of its id.');
+            }
+
+            $childTable  = (string) $key['child_table'];
+            $childColumn = (string) $key['child_column'];
+
+            foreach ([$childTable, $childColumn] as $name) {
+                if (1 !== preg_match($plainName, $name)) {
+                    throw new \RuntimeException('Cannot clean '.$table.', because '.$name.' is not a plain table or column name.');
+                }
+            }
+
+            $keyUsers[$childTable.'.'.$childColumn] = true;
+            $columns[]                              = $childColumn;
+        }
+
+        $columns = array_values(array_unique($columns));
+        $users   = $this->listAddressColumns($columns);
+
+        foreach ($users as $user) {
+            foreach (explode('.', $user, 2) as $name) {
+                if (1 !== preg_match($plainName, $name)) {
+                    throw new \RuntimeException('Cannot clean '.$table.', because '.$name.' is not a plain table or column name.');
+                }
+            }
+        }
+
+        $indexed = [];
+        $indexes = $this->connection->executeQuery(
+            'SELECT DISTINCT TABLE_NAME AS table_name, COLUMN_NAME AS column_name FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND SEQ_IN_INDEX = 1 AND COLUMN_NAME IN (:columns)',
+            ['columns' => $columns],
+            ['columns' => ArrayParameterType::STRING]
+        )->fetchAllAssociative();
+
+        foreach ($indexes as $index) {
+            $indexed[$index['table_name'].'.'.$index['column_name']] = true;
+        }
+
+        $missing = [];
+
+        foreach ($users as $user) {
+            if (isset($keyUsers[$user])) {
+                continue;
+            }
+
+            if (str_starts_with($user, $this->dbPrefix.self::ARCHIVE_PREFIX)) {
+                if (!isset($indexed[$user])) {
+                    $missing[] = $user;
+                }
+
+                continue;
+            }
+
+            if (!isset($indexed[$user])) {
+                throw new \RuntimeException('Cannot clean '.$table.', because '.$user.' can hold an address ID but has no foreign key and no index. Add an index on it, or drop the table.');
+            }
+        }
+
+        if ([] !== $missing) {
+            $this->addArchiveIndexes($missing, $output);
+        }
+
+        if ($output->isVerbose()) {
+            $output->writeln('Tables that can hold an ip_addresses ID: '.implode(', ', $users));
+        }
+
+        return ['columns' => $columns, 'users' => $users];
+    }
+
+    /**
+     * Lists the base tables of this database that have one of these columns.
+     *
+     * @param list<string> $columns the column names that point at ip_addresses
+     *
+     * @return list<string> each table and column as table.column, in sorted order
+     */
+    private function listAddressColumns(array $columns): array
+    {
+        $list = array_map(
+            static fn (array $row): string => $row['table_name'].'.'.$row['column_name'],
+            $this->connection->executeQuery(
+                "SELECT c.TABLE_NAME AS table_name, c.COLUMN_NAME AS column_name FROM information_schema.COLUMNS c JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME WHERE c.TABLE_SCHEMA = DATABASE() AND t.TABLE_TYPE = 'BASE TABLE' AND c.COLUMN_NAME IN (:columns)",
+                ['columns' => $columns],
+                ['columns' => ArrayParameterType::STRING]
+            )->fetchAllAssociative()
+        );
+
+        sort($list, SORT_STRING);
+
+        return $list;
+    }
+
+    /**
+     * Adds an index on the address column of each of these archive tables, waiting at most IP_LOCK_WAIT_TIMEOUT seconds for each table.
+     *
+     * @param non-empty-list<string> $users  the archive tables and columns as table.column
+     * @param OutputInterface        $output prints each statement when verbose
+     */
+    private function addArchiveIndexes(array $users, OutputInterface $output): void
+    {
+        $savedTimeout = (int) $this->connection->executeQuery('SELECT @@SESSION.lock_wait_timeout', [], [])->fetchOne();
+        $statements   = ['SET SESSION lock_wait_timeout = '.self::IP_LOCK_WAIT_TIMEOUT];
+
+        foreach ($users as $user) {
+            [$userTable, $column] = explode('.', $user, 2);
+            $statements[]         = 'ALTER TABLE '.$userTable.' ADD INDEX '.self::IP_INDEX_PREFIX.$column.' ('.$column.'), ALGORITHM=INPLACE, LOCK=NONE';
+        }
+
+        $restore = 'SET SESSION lock_wait_timeout = '.$savedTimeout;
+
+        try {
+            foreach ($statements as $sql) {
+                if ($output->isVerbose()) {
+                    $output->writeln($sql);
+                }
+
+                $this->connection->executeQuery($sql, [], []);
+            }
+        } finally {
+            if ($output->isVerbose()) {
+                $output->writeln($restore);
+            }
+
+            $this->connection->executeQuery($restore, [], []);
+        }
+    }
+
+    /**
+     * Lists the ID ranges of this run's slice, one per block of IP_SLICE_BLOCK IDs, up to the given ID.
+     *
+     * @param int $upper the highest ID to check
+     *
+     * @return list<array{0: int, 1: int}> the first and last ID of each range, in ID order
+     */
+    private function ipRanges(int $upper): array
+    {
+        $ranges = [];
+
+        for ($start = ($this->ipSlice - 1) * self::IP_SLICE_BLOCK; $start < $upper; $start += $this->ipSlices * self::IP_SLICE_BLOCK) {
+            $ranges[] = [$start + 1, min($start + self::IP_SLICE_BLOCK, $upper)];
+        }
+
+        return $ranges;
+    }
+
+    /**
+     * Deletes the rows of one batch that are still unused, in a single transaction, and with the archive on copies them first.
+     * A row that another transaction holds, or that came into use since the select, is left for a later run.
+     * A deadlock or a lock wait timeout rolls the batch back and tries it once more.
+     * Each try runs at READ COMMITTED, so the foreign key checks of the delete lock no gaps in the tables that use an address.
+     *
+     * @param array{table: string, lock: string, check: string, copy: string|null, delete: string} $statements the statements of this run
+     * @param non-empty-list<int>                                                                  $ids        the IDs the select found unused
+     * @param array{columns: list<string>, users: list<string>}                                    $found      the users found at the start of the run
+     *
+     * @return int how many rows were deleted
+     */
+    private function writeIpBatch(array $statements, array $ids, array $found): int
+    {
+        $batchTypes = ['batchIds' => ArrayParameterType::INTEGER];
+
+        for ($attempt = 1;; ++$attempt) {
+            $this->connection->executeQuery(self::IP_ISOLATION, [], []);
+            $this->connection->beginTransaction();
+
+            try {
+                $free    = array_map(intval(...), $this->connection->executeQuery($statements['lock'], ['batchIds' => $ids], $batchTypes)->fetchFirstColumn());
+                $written = 0;
+
+                if ([] !== $free) {
+                    $free = array_map(intval(...), $this->connection->executeQuery($statements['check'], ['batchIds' => $free], $batchTypes)->fetchFirstColumn());
+                }
+
+                if ([] !== $free) {
+                    if ($this->listAddressColumns($found['columns']) !== $found['users']) {
+                        throw new \RuntimeException('Cannot clean '.$statements['table'].', because the tables that can hold an address ID changed during the run. The batch was rolled back. Run it again.');
+                    }
+
+                    $copied  = null === $statements['copy'] ? null : $this->connection->executeQuery($statements['copy'], ['batchIds' => $free], $batchTypes)->rowCount();
+                    $written = $this->connection->executeQuery($statements['delete'], ['batchIds' => $free], $batchTypes)->rowCount();
+
+                    if (null !== $copied && ($copied !== count($free) || $written !== $copied)) {
+                        throw new \RuntimeException('Archive check failed on '.$statements['table'].': '.$copied.' rows copied, '.$written.' written, '.count($free).' expected. The batch was rolled back.');
+                    }
+
+                    if ($written !== count($free)) {
+                        throw new \RuntimeException('Batch check failed on '.$statements['table'].': '.$written.' rows written, '.count($free).' expected. The batch was rolled back.');
+                    }
+                }
+
+                $this->connection->commit();
+
+                return $written;
+            } catch (\Throwable $throwable) {
+                $this->connection->rollBack();
+
+                if ($throwable instanceof RetryableException && 1 === $attempt) {
+                    $this->logger->warning('The ip_addresses batch from ID '.$ids[0].' was rolled back and runs once more: '.$throwable->getMessage());
+
+                    continue;
+                }
+
+                throw $throwable;
+            }
+        }
     }
 
     public function optimizeTables(OutputInterface $output): string
