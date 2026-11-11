@@ -40,6 +40,7 @@ class EventLogCleanup
     private const IP_LOCK_WAIT_TIMEOUT = 30;
     private const IP_WINDOW_TYPES      = ['lastId' => \PDO::PARAM_INT, 'toId' => \PDO::PARAM_INT];
     private const IP_ISOLATION         = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED';
+    private const IP_PLAIN_NAME        = '/\A[A-Za-z0-9_$]+\z/';
 
     /**
      * The date column of each table whose IDs grow with that date. The campaign log is left out, because its date_triggered can be set long after the row is created.
@@ -357,9 +358,7 @@ class EventLogCleanup
             $message .= ' Stopped at the limit of '.$maxRows.' rows for this run. Any rows left wait for the next run.';
         }
 
-        $message .= $this->ipMessage;
-
-        return $message;
+        return $message.$this->ipMessage;
     }
 
     /**
@@ -506,6 +505,7 @@ class EventLogCleanup
     /**
      * Creates the archive tables an operation needs, and returns the statements each batch uses to copy its rows.
      * A delete also copies the rows of each child table that a foreign key cascade empties with it.
+     * The ip_addresses cleanup has no child rows to copy, because it deletes only addresses that no table uses, so no foreign key acts on its delete.
      * The archive tables are made with CREATE TABLE ... SELECT, so they have the same columns as their source, with no keys, and generated columns become plain ones.
      * Rows are copied by column position, so an archive table whose columns differ from its source in name, order, type, size, nullability,
      * character set or collation is rejected. Without strict SQL mode a narrower column would cut values with only a warning.
@@ -516,7 +516,7 @@ class EventLogCleanup
     {
         $children = [];
 
-        if (!array_key_exists($operation, $this->update)) {
+        if (!array_key_exists($operation, $this->update) && self::IP_ADDRESSES !== $operation) {
             foreach ($this->findCascadeChildren($table) as $child => $column) {
                 if ([] !== $this->findCascadeChildren($child)) {
                     throw new \RuntimeException('Cannot archive '.$table.', because a delete there cascades from '.$child.' to further tables.');
@@ -839,29 +839,88 @@ class EventLogCleanup
 
     /**
      * Finds every table column that can hold an ip_addresses ID, and adds an index to each archive table column that has none.
+     * A user is a table with a foreign key to ip_addresses, or a housekeeping_archive_ table, whose rows come only from tables with such a key.
+     * Any other table with the same column stops the run, because a row added there takes no lock on its address and so does not wait for the delete.
      *
      * @param string          $table  the ip_addresses table with its prefix
      * @param OutputInterface $output prints the users and each added index when verbose
      *
-     * @return array{columns: list<string>, users: list<string>} the key column names, and each user as table.column in sorted order
+     * @return array{keys: list<string>, columns: list<string>, users: list<string>} the keys and the users as table.column in sorted order, and the key column names
      */
     private function findAddressUsers(string $table, OutputInterface $output): array
     {
-        $plainName = '/\A[A-Za-z0-9_$]+\z/';
-        $keys      = $this->connection->executeQuery(
+        $found    = $this->readAddressKeys($table);
+        $users    = $this->listAddressColumns($found['columns']);
+        $keyUsers = array_flip($found['keys']);
+        $archives = [];
+
+        foreach ($users as $user) {
+            foreach (explode('.', $user, 2) as $name) {
+                if (1 !== preg_match(self::IP_PLAIN_NAME, $name)) {
+                    throw new \RuntimeException('Cannot clean '.$table.', because '.$name.' is not a plain table or column name.');
+                }
+            }
+
+            if (isset($keyUsers[$user])) {
+                continue;
+            }
+
+            if (!str_starts_with($user, $this->dbPrefix.self::ARCHIVE_PREFIX)) {
+                throw new \RuntimeException('Cannot clean '.$table.', because '.$user.' can hold an address ID but has no foreign key to it, so a row added there would not wait for the delete. Add a foreign key on it to the id of '.$table.', or drop the table.');
+            }
+
+            $archives[] = $user;
+        }
+
+        if ([] !== $archives) {
+            $indexed = [];
+            $indexes = $this->connection->executeQuery(
+                'SELECT DISTINCT TABLE_NAME AS table_name, COLUMN_NAME AS column_name FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND SEQ_IN_INDEX = 1 AND COLUMN_NAME IN (:columns)',
+                ['columns' => $found['columns']],
+                ['columns' => ArrayParameterType::STRING]
+            )->fetchAllAssociative();
+
+            foreach ($indexes as $index) {
+                $indexed[$index['table_name'].'.'.$index['column_name']] = true;
+            }
+
+            $missing = array_values(array_filter($archives, static fn (string $archive): bool => !isset($indexed[$archive])));
+
+            if ([] !== $missing) {
+                $this->addArchiveIndexes($missing, $output);
+            }
+        }
+
+        if ($output->isVerbose()) {
+            $output->writeln('Tables that can hold an ip_addresses ID: '.implode(', ', $users));
+        }
+
+        return ['keys' => $found['keys'], 'columns' => $found['columns'], 'users' => $users];
+    }
+
+    /**
+     * Reads the foreign keys that point at ip_addresses, and rejects any that the cleanup cannot check.
+     *
+     * @param string $table the ip_addresses table with its prefix
+     *
+     * @return array{keys: list<string>, columns: list<string>} each key as table.column in sorted order, and the key column names in sorted order
+     */
+    private function readAddressKeys(string $table): array
+    {
+        $rows = $this->connection->executeQuery(
             'SELECT k.TABLE_SCHEMA = k.REFERENCED_TABLE_SCHEMA AS same_database, k.TABLE_SCHEMA AS child_schema, k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column FROM information_schema.KEY_COLUMN_USAGE k WHERE k.REFERENCED_TABLE_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table',
             ['table' => $table],
             ['table' => \PDO::PARAM_STR]
         )->fetchAllAssociative();
 
-        if ([] === $keys) {
+        if ([] === $rows) {
             throw new \RuntimeException('Cannot clean '.$table.', because no foreign key points at it, so the tables that use an address cannot be found.');
         }
 
-        $keyUsers = [];
-        $columns  = [];
+        $keys    = [];
+        $columns = [];
 
-        foreach ($keys as $key) {
+        foreach ($rows as $key) {
             if (1 !== (int) $key['same_database']) {
                 throw new \RuntimeException('Cannot clean '.$table.', because '.$key['child_schema'].'.'.$key['child_table'].' in another database points at it.');
             }
@@ -874,66 +933,21 @@ class EventLogCleanup
             $childColumn = (string) $key['child_column'];
 
             foreach ([$childTable, $childColumn] as $name) {
-                if (1 !== preg_match($plainName, $name)) {
+                if (1 !== preg_match(self::IP_PLAIN_NAME, $name)) {
                     throw new \RuntimeException('Cannot clean '.$table.', because '.$name.' is not a plain table or column name.');
                 }
             }
 
-            $keyUsers[$childTable.'.'.$childColumn] = true;
-            $columns[]                              = $childColumn;
+            $keys[]    = $childTable.'.'.$childColumn;
+            $columns[] = $childColumn;
         }
 
+        $keys    = array_values(array_unique($keys));
         $columns = array_values(array_unique($columns));
-        $users   = $this->listAddressColumns($columns);
+        sort($keys, SORT_STRING);
+        sort($columns, SORT_STRING);
 
-        foreach ($users as $user) {
-            foreach (explode('.', $user, 2) as $name) {
-                if (1 !== preg_match($plainName, $name)) {
-                    throw new \RuntimeException('Cannot clean '.$table.', because '.$name.' is not a plain table or column name.');
-                }
-            }
-        }
-
-        $indexed = [];
-        $indexes = $this->connection->executeQuery(
-            'SELECT DISTINCT TABLE_NAME AS table_name, COLUMN_NAME AS column_name FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND SEQ_IN_INDEX = 1 AND COLUMN_NAME IN (:columns)',
-            ['columns' => $columns],
-            ['columns' => ArrayParameterType::STRING]
-        )->fetchAllAssociative();
-
-        foreach ($indexes as $index) {
-            $indexed[$index['table_name'].'.'.$index['column_name']] = true;
-        }
-
-        $missing = [];
-
-        foreach ($users as $user) {
-            if (isset($keyUsers[$user])) {
-                continue;
-            }
-
-            if (str_starts_with($user, $this->dbPrefix.self::ARCHIVE_PREFIX)) {
-                if (!isset($indexed[$user])) {
-                    $missing[] = $user;
-                }
-
-                continue;
-            }
-
-            if (!isset($indexed[$user])) {
-                throw new \RuntimeException('Cannot clean '.$table.', because '.$user.' can hold an address ID but has no foreign key and no index. Add an index on it, or drop the table.');
-            }
-        }
-
-        if ([] !== $missing) {
-            $this->addArchiveIndexes($missing, $output);
-        }
-
-        if ($output->isVerbose()) {
-            $output->writeln('Tables that can hold an ip_addresses ID: '.implode(', ', $users));
-        }
-
-        return ['columns' => $columns, 'users' => $users];
+        return ['keys' => $keys, 'columns' => $columns];
     }
 
     /**
@@ -1017,10 +1031,11 @@ class EventLogCleanup
      * A row that another transaction holds, or that came into use since the select, is left for a later run.
      * A deadlock or a lock wait timeout rolls the batch back and tries it once more.
      * Each try runs at READ COMMITTED, so the foreign key checks of the delete lock no gaps in the tables that use an address.
+     * Before the delete it reads the foreign keys and the tables with the address column again, and rolls back when either changed since the start of the run.
      *
      * @param array{table: string, lock: string, check: string, copy: string|null, delete: string} $statements the statements of this run
      * @param non-empty-list<int>                                                                  $ids        the IDs the select found unused
-     * @param array{columns: list<string>, users: list<string>}                                    $found      the users found at the start of the run
+     * @param array{keys: list<string>, columns: list<string>, users: list<string>}                $found      the keys and users found at the start of the run
      *
      * @return int how many rows were deleted
      */
@@ -1041,7 +1056,9 @@ class EventLogCleanup
                 }
 
                 if ([] !== $free) {
-                    if ($this->listAddressColumns($found['columns']) !== $found['users']) {
+                    $current = $this->readAddressKeys($statements['table']);
+
+                    if ($current['keys'] !== $found['keys'] || $this->listAddressColumns($current['columns']) !== $found['users']) {
                         throw new \RuntimeException('Cannot clean '.$statements['table'].', because the tables that can hold an address ID changed during the run. The batch was rolled back. Run it again.');
                     }
 

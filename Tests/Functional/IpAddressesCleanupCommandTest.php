@@ -158,15 +158,15 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
     }
 
     /**
-     * Stops before it deletes anything when a table has the address column with no foreign key and no index.
+     * Stops before it deletes any address when a table that is not an archive has the address column with no foreign key, even with an index on it.
      */
-    public function testRejectsATableWithAnAddressColumnButNoKeyAndNoIndex(): void
+    public function testRejectsATableWithAnAddressColumnButNoForeignKey(): void
     {
         $connection = $this->em->getConnection();
         $table      = MAUTIC_TABLE_PREFIX.'housekeeping_test_ip_copy';
 
         $connection->executeStatement('DROP TABLE IF EXISTS '.$table);
-        $connection->executeStatement('CREATE TABLE '.$table.' (ip_id INT UNSIGNED NULL) ENGINE=InnoDB');
+        $connection->executeStatement('CREATE TABLE '.$table.' (ip_id INT UNSIGNED NULL, KEY housekeeping_test_ip_id (ip_id)) ENGINE=InnoDB');
 
         try {
             $unused = $this->fixtureHelper->createIpAddress('192.0.2.16');
@@ -178,7 +178,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
             ]);
 
             $this->assertSame(1, $commandTester->getStatusCode());
-            $this->assertStringContainsString('has no foreign key and no index', $commandTester->getDisplay());
+            $this->assertStringContainsString('has no foreign key to it, so a row added there would not wait for the delete', $commandTester->getDisplay());
             $this->assertTrue($this->addressExists((int) $unused->getId()));
         } finally {
             $connection->executeStatement('DROP TABLE IF EXISTS '.$table);

@@ -42,12 +42,12 @@ final class EventLogCleanupIpAddressesTest extends TestCase
     private array $events = [];
 
     /**
-     * Counts every table with a key to ip_addresses, every archive table and every other indexed table with the same column as a user.
+     * Counts every table with a key to ip_addresses and every archive table with the same column as a user.
      */
-    public function testReadsTheTablesThatHoldAnAddressFromKeysArchivesAndIndexedTables(): void
+    public function testReadsTheTablesThatHoldAnAddressFromKeysAndArchives(): void
     {
-        $tables = ['prefix_table_page_hits', 'prefix_table_housekeeping_archive_page_hits', 'prefix_table_email_stats', 'prefix_table_custom_visits'];
-        $unused = 'NOT EXISTS (SELECT 1 FROM prefix_table_custom_visits u WHERE u.ip_id = a.id) AND NOT EXISTS (SELECT 1 FROM prefix_table_email_stats u WHERE u.ip_id = a.id) AND NOT EXISTS (SELECT 1 FROM prefix_table_housekeeping_archive_page_hits u WHERE u.ip_id = a.id) AND NOT EXISTS (SELECT 1 FROM prefix_table_page_hits u WHERE u.ip_id = a.id)';
+        $tables = ['prefix_table_page_hits', 'prefix_table_housekeeping_archive_page_hits', 'prefix_table_email_stats'];
+        $unused = 'NOT EXISTS (SELECT 1 FROM prefix_table_email_stats u WHERE u.ip_id = a.id) AND NOT EXISTS (SELECT 1 FROM prefix_table_housekeeping_archive_page_hits u WHERE u.ip_id = a.id) AND NOT EXISTS (SELECT 1 FROM prefix_table_page_hits u WHERE u.ip_id = a.id)';
 
         $connection = $this->createIpConnection([
             [self::IP_KEYS_SQL, ['table' => 'prefix_table_ip_addresses'], ['table' => \PDO::PARAM_STR], self::keys()],
@@ -65,7 +65,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             '0 ip_addresses rows have been deleted.'.self::CHECKED_ALL,
             $this->createEventLogCleanup($connection)->deleteEventLogEntries(4, null, false, [EventLogCleanup::IP_ADDRESSES => true], $this->createVerboseOutput($lines), null, 2)
         );
-        $this->assertContains('Tables that can hold an ip_addresses ID: prefix_table_custom_visits.ip_id, prefix_table_email_stats.ip_id, prefix_table_housekeeping_archive_page_hits.ip_id, prefix_table_page_hits.ip_id', $lines);
+        $this->assertContains('Tables that can hold an ip_addresses ID: prefix_table_email_stats.ip_id, prefix_table_housekeeping_archive_page_hits.ip_id, prefix_table_page_hits.ip_id', $lines);
         $this->assertContains('Checking ip_addresses IDs up to 25000, slice 1 of 1, in blocks of 100000. The newest 1000000 IDs are left out.', $lines);
         $this->assertContains(self::selectSql(2, $unused), $lines);
         $this->assertContains('IDs 1 to 25000: 0 deleted, 0 kept for a later run.', $lines);
@@ -129,13 +129,12 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             'Cannot clean prefix_table_ip_addresses, because prefix_table_old hits is not a plain table or column name.',
         ];
 
-        yield 'a column with no key and no index' => [
+        yield 'a column with no key, indexed or not, outside an archive table' => [
             [
                 [self::IP_KEYS_SQL, $table, $keysTypes, self::keys()],
                 [self::IP_TABLES_SQL, $columns, $columnsTypes, self::rows('prefix_table_page_hits', 'prefix_table_email_stats', 'prefix_table_ip_copy')],
-                [self::IP_INDEXES_SQL, $columns, $columnsTypes, self::rows('prefix_table_page_hits', 'prefix_table_email_stats')],
             ],
-            'Cannot clean prefix_table_ip_addresses, because prefix_table_ip_copy.ip_id can hold an address ID but has no foreign key and no index. Add an index on it, or drop the table.',
+            'Cannot clean prefix_table_ip_addresses, because prefix_table_ip_copy.ip_id can hold an address ID but has no foreign key to it, so a row added there would not wait for the delete. Add a foreign key on it to the id of prefix_table_ip_addresses, or drop the table.',
         ];
     }
 
@@ -266,7 +265,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
-            self::relist(),
+            ...self::relist(),
             self::batch(self::DELETE_SQL, [10], 1),
             self::select(10000, 20000, []),
             self::select(20000, 25000, []),
@@ -274,7 +273,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
 
         $this->assertSame('1 ip_addresses rows have been deleted.'.self::CHECKED_ALL, $this->runIpCleanup($connection));
         $this->assertSame(
-            [self::IP_KEYS_SQL, self::IP_TABLES_SQL, self::IP_INDEXES_SQL, self::MAX_SQL, self::selectSql(2), self::ISOLATION_SQL, 'begin', self::LOCK_SQL, self::CHECK_SQL, self::IP_TABLES_SQL, self::DELETE_SQL, 'commit', self::selectSql(2), self::selectSql(2)],
+            [self::IP_KEYS_SQL, self::IP_TABLES_SQL, self::MAX_SQL, self::selectSql(2), self::ISOLATION_SQL, 'begin', self::LOCK_SQL, self::CHECK_SQL, self::IP_KEYS_SQL, self::IP_TABLES_SQL, self::DELETE_SQL, 'commit', self::selectSql(2), self::selectSql(2)],
             $this->events
         );
     }
@@ -290,7 +289,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10, 20, 30], ['10', '30']),
             self::batch(self::CHECK_SQL, [10, 30], ['30']),
-            self::relist(),
+            ...self::relist(),
             self::batch(self::DELETE_SQL, [30], 1),
             self::select(10000, 20000, [], 5),
             self::select(20000, 25000, [], 5),
@@ -327,7 +326,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10, 20], ['10', '20']),
             self::batch(self::CHECK_SQL, [10, 20], ['10', '20']),
-            self::relist(),
+            ...self::relist(),
             self::batch(self::DELETE_SQL, [10, 20], 2),
             self::select(20, 10000, []),
             self::select(10000, 20000, []),
@@ -348,13 +347,13 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10, 20], ['10', '20']),
             self::batch(self::CHECK_SQL, [10, 20], ['10', '20']),
-            self::relist(),
+            ...self::relist(),
             self::batch(self::DELETE_SQL, [10, 20], 2),
             self::select(20, 10000, ['30'], 1),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [30], ['30']),
             self::batch(self::CHECK_SQL, [30], ['30']),
-            self::relist(),
+            ...self::relist(),
             self::batch(self::DELETE_SQL, [30], 1),
         ], 2, 2, 0);
 
@@ -379,7 +378,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [100010], ['100010']),
             self::batch(self::CHECK_SQL, [100010], ['100010']),
-            self::relist(),
+            ...self::relist(),
             self::batch(self::DELETE_SQL, [100010], 1),
         ], 1, 1, 0);
 
@@ -407,7 +406,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [25000], ['25000']),
             self::batch(self::CHECK_SQL, [25000], ['25000']),
-            self::relist(),
+            ...self::relist(),
             self::batch(self::DELETE_SQL, [25000], 1),
         ], 1, 1, 0);
 
@@ -430,7 +429,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
-            self::relist(),
+            ...self::relist(),
             self::batch(self::DELETE_SQL, [10], 1),
             self::select(10000, 20000, []),
             self::select(20000, 25000, []),
@@ -477,7 +476,27 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
-            self::relist(self::rows('prefix_table_page_hits', 'prefix_table_email_stats', 'prefix_table_housekeeping_archive_page_hits')),
+            ...self::relist(self::rows('prefix_table_page_hits', 'prefix_table_email_stats', 'prefix_table_housekeeping_archive_page_hits')),
+        ], 1, 0, 1);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessageMatches('/\A'.preg_quote('Cannot clean prefix_table_ip_addresses, because the tables that can hold an address ID changed during the run. The batch was rolled back. Run it again.', '/').'\z/');
+
+        $this->runIpCleanup($connection);
+    }
+
+    /**
+     * Rolls the batch back and stops when a foreign key to ip_addresses appears during the run on a column with another name.
+     */
+    public function testRollsBackWhenTheKeysChange(): void
+    {
+        $connection = $this->createIpConnection([
+            ...self::usersFound(),
+            self::select(0, 10000, ['10']),
+            self::READ_COMMITTED,
+            self::batch(self::LOCK_SQL, [10], ['10']),
+            self::batch(self::CHECK_SQL, [10], ['10']),
+            [self::IP_KEYS_SQL, ['table' => 'prefix_table_ip_addresses'], ['table' => \PDO::PARAM_STR], [...self::keys(), self::key('prefix_table_visits', 'address_id')]],
         ], 1, 0, 1);
 
         $this->expectException(\RuntimeException::class);
@@ -497,7 +516,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
-            self::relist(),
+            ...self::relist(),
             self::batch(self::DELETE_SQL, [10], 0),
         ], 1, 0, 1);
 
@@ -519,7 +538,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
-            self::relist(),
+            ...self::relist(),
             self::batch(self::COPY_SQL, [10], 1),
             self::batch(self::DELETE_SQL, [10], 1),
             self::select(10000, 20000, []),
@@ -530,7 +549,8 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             '1 ip_addresses rows have been deleted. Every deleted or changed row was copied to a housekeeping_archive_ table first.'.self::CHECKED_ALL,
             $this->runIpCleanup($connection, 2, null, true)
         );
-        $this->assertSame([self::ISOLATION_SQL, 'begin', self::LOCK_SQL, self::CHECK_SQL, self::IP_TABLES_SQL, self::COPY_SQL, self::DELETE_SQL, 'commit'], array_slice($this->events, 9, 8));
+        $this->assertSame([self::ISOLATION_SQL, 'begin', self::LOCK_SQL, self::CHECK_SQL, self::IP_KEYS_SQL, self::IP_TABLES_SQL, self::COPY_SQL, self::DELETE_SQL, 'commit'], array_slice($this->events, 7, 9));
+        $this->assertNotContains(self::KEYS_SQL, $this->events);
     }
 
     /**
@@ -545,7 +565,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
-            self::relist(),
+            ...self::relist(),
             self::batch(self::COPY_SQL, [10], 0),
             self::batch(self::DELETE_SQL, [10], 1),
         ], 1, 0, 1);
@@ -722,13 +742,12 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         return [
             [self::IP_KEYS_SQL, ['table' => 'prefix_table_ip_addresses'], ['table' => \PDO::PARAM_STR], self::keys()],
             [self::IP_TABLES_SQL, ['columns' => ['ip_id']], ['columns' => ArrayParameterType::STRING], self::rows('prefix_table_page_hits', 'prefix_table_email_stats')],
-            [self::IP_INDEXES_SQL, ['columns' => ['ip_id']], ['columns' => ArrayParameterType::STRING], self::rows('prefix_table_page_hits', 'prefix_table_email_stats')],
             [self::MAX_SQL, [], [], $max],
         ];
     }
 
     /**
-     * Returns the queries that make the archive table of ip_addresses, where every key is RESTRICT.
+     * Returns the queries that make the archive table of ip_addresses. They read no delete rule of the keys, since no key acts on the delete of an unused address.
      *
      * @return list<list<mixed>> the queries with their answers
      */
@@ -738,7 +757,6 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $columns   = ['id int(10) unsigned NO', 'ip_address varchar(45) NO utf8mb4 utf8mb4_unicode_ci', 'ip_details longtext YES utf8mb4 utf8mb4_unicode_ci'];
 
         return [
-            [self::KEYS_SQL, ['table' => 'prefix_table_ip_addresses'], $keysTypes, [['child_table' => 'prefix_table_page_hits', 'child_column' => 'ip_id', 'referenced_column' => 'id', 'delete_rule' => 'RESTRICT']]],
             ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_ip_addresses SELECT * FROM prefix_table_ip_addresses LIMIT 0', [], [], null],
             [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_ip_addresses'], $keysTypes, $columns],
             [self::COLUMNS_SQL, ['table' => 'prefix_table_ip_addresses'], $keysTypes, $columns],
@@ -789,15 +807,18 @@ final class EventLogCleanupIpAddressesTest extends TestCase
     }
 
     /**
-     * Returns the query that lists the tables with the address column again inside a batch.
+     * Returns the queries that read the keys and list the tables with the address column again inside a batch.
      *
      * @param list<array{table_name: string, column_name: string}>|null $rows the tables it finds, by default the same as at the start
      *
-     * @return list<mixed> the query with its answer
+     * @return list<list<mixed>> the queries with their answers
      */
     private static function relist(?array $rows = null): array
     {
-        return [self::IP_TABLES_SQL, ['columns' => ['ip_id']], ['columns' => ArrayParameterType::STRING], $rows ?? self::rows('prefix_table_page_hits', 'prefix_table_email_stats')];
+        return [
+            [self::IP_KEYS_SQL, ['table' => 'prefix_table_ip_addresses'], ['table' => \PDO::PARAM_STR], self::keys()],
+            [self::IP_TABLES_SQL, ['columns' => ['ip_id']], ['columns' => ArrayParameterType::STRING], $rows ?? self::rows('prefix_table_page_hits', 'prefix_table_email_stats')],
+        ];
     }
 
     /**
