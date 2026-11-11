@@ -1027,11 +1027,8 @@ class EventLogCleanup
     }
 
     /**
-     * Deletes the rows of one batch that are still unused, in a single transaction, and with the archive on copies them first.
+     * Deletes the rows of one batch that are still unused, and tries the batch once more when a deadlock or a lock wait timeout rolled it back.
      * A row that another transaction holds, or that came into use since the select, is left for a later run.
-     * A deadlock or a lock wait timeout rolls the batch back and tries it once more.
-     * Each try runs at READ COMMITTED, so the foreign key checks of the delete lock no gaps in the tables that use an address.
-     * Before the delete it reads the foreign keys and the tables with the address column again, and rolls back when either changed since the start of the run.
      *
      * @param array{table: string, lock: string, check: string, copy: string|null, delete: string} $statements the statements of this run
      * @param non-empty-list<int>                                                                  $ids        the IDs the select found unused
@@ -1041,53 +1038,67 @@ class EventLogCleanup
      */
     private function writeIpBatch(array $statements, array $ids, array $found): int
     {
+        try {
+            return $this->tryIpBatch($statements, $ids, $found);
+        } catch (RetryableException $exception) {
+            $this->logger->warning('The ip_addresses batch from ID '.$ids[0].' was rolled back and runs once more: '.$exception->getMessage());
+
+            return $this->tryIpBatch($statements, $ids, $found);
+        }
+    }
+
+    /**
+     * Runs one try of a batch in a single transaction, and with the archive on copies the rows first. Any error rolls the try back.
+     * The try runs at READ COMMITTED, so the foreign key checks of the delete lock no gaps in the tables that use an address.
+     * Before the delete it reads the foreign keys and the tables with the address column again, and rolls back when either changed since the start of the run.
+     *
+     * @param array{table: string, lock: string, check: string, copy: string|null, delete: string} $statements the statements of this run
+     * @param non-empty-list<int>                                                                  $ids        the IDs the select found unused
+     * @param array{keys: list<string>, columns: list<string>, users: list<string>}                $found      the keys and users found at the start of the run
+     *
+     * @return int how many rows were deleted
+     */
+    private function tryIpBatch(array $statements, array $ids, array $found): int
+    {
         $batchTypes = ['batchIds' => ArrayParameterType::INTEGER];
 
-        for ($attempt = 1;; ++$attempt) {
-            $this->connection->executeQuery(self::IP_ISOLATION, [], []);
-            $this->connection->beginTransaction();
+        $this->connection->executeQuery(self::IP_ISOLATION, [], []);
+        $this->connection->beginTransaction();
 
-            try {
-                $free    = array_map(intval(...), $this->connection->executeQuery($statements['lock'], ['batchIds' => $ids], $batchTypes)->fetchFirstColumn());
-                $written = 0;
+        try {
+            $free    = array_map(intval(...), $this->connection->executeQuery($statements['lock'], ['batchIds' => $ids], $batchTypes)->fetchFirstColumn());
+            $written = 0;
 
-                if ([] !== $free) {
-                    $free = array_map(intval(...), $this->connection->executeQuery($statements['check'], ['batchIds' => $free], $batchTypes)->fetchFirstColumn());
-                }
-
-                if ([] !== $free) {
-                    $current = $this->readAddressKeys($statements['table']);
-
-                    if ($current['keys'] !== $found['keys'] || $this->listAddressColumns($current['columns']) !== $found['users']) {
-                        throw new \RuntimeException('Cannot clean '.$statements['table'].', because the tables that can hold an address ID changed during the run. The batch was rolled back. Run it again.');
-                    }
-
-                    $copied  = null === $statements['copy'] ? null : $this->connection->executeQuery($statements['copy'], ['batchIds' => $free], $batchTypes)->rowCount();
-                    $written = $this->connection->executeQuery($statements['delete'], ['batchIds' => $free], $batchTypes)->rowCount();
-
-                    if (null !== $copied && ($copied !== count($free) || $written !== $copied)) {
-                        throw new \RuntimeException('Archive check failed on '.$statements['table'].': '.$copied.' rows copied, '.$written.' written, '.count($free).' expected. The batch was rolled back.');
-                    }
-
-                    if ($written !== count($free)) {
-                        throw new \RuntimeException('Batch check failed on '.$statements['table'].': '.$written.' rows written, '.count($free).' expected. The batch was rolled back.');
-                    }
-                }
-
-                $this->connection->commit();
-
-                return $written;
-            } catch (\Throwable $throwable) {
-                $this->connection->rollBack();
-
-                if ($throwable instanceof RetryableException && 1 === $attempt) {
-                    $this->logger->warning('The ip_addresses batch from ID '.$ids[0].' was rolled back and runs once more: '.$throwable->getMessage());
-
-                    continue;
-                }
-
-                throw $throwable;
+            if ([] !== $free) {
+                $free = array_map(intval(...), $this->connection->executeQuery($statements['check'], ['batchIds' => $free], $batchTypes)->fetchFirstColumn());
             }
+
+            if ([] !== $free) {
+                $current = $this->readAddressKeys($statements['table']);
+
+                if ($current['keys'] !== $found['keys'] || $this->listAddressColumns($current['columns']) !== $found['users']) {
+                    throw new \RuntimeException('Cannot clean '.$statements['table'].', because the tables that can hold an address ID changed during the run. The batch was rolled back. Run it again.');
+                }
+
+                $copied  = null === $statements['copy'] ? null : $this->connection->executeQuery($statements['copy'], ['batchIds' => $free], $batchTypes)->rowCount();
+                $written = $this->connection->executeQuery($statements['delete'], ['batchIds' => $free], $batchTypes)->rowCount();
+
+                if (null !== $copied && ($copied !== count($free) || $written !== $copied)) {
+                    throw new \RuntimeException('Archive check failed on '.$statements['table'].': '.$copied.' rows copied, '.$written.' written, '.count($free).' expected. The batch was rolled back.');
+                }
+
+                if ($written !== count($free)) {
+                    throw new \RuntimeException('Batch check failed on '.$statements['table'].': '.$written.' rows written, '.count($free).' expected. The batch was rolled back.');
+                }
+            }
+
+            $this->connection->commit();
+
+            return $written;
+        } catch (\Throwable $throwable) {
+            $this->connection->rollBack();
+
+            throw $throwable;
         }
     }
 
