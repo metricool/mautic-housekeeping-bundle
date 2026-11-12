@@ -95,7 +95,9 @@ The command stops with an error before it deletes any address when no foreign ke
 How a run works:
 - It leaves out the newest 1000000 IDs, because Mautic saves a new address a moment before the row that uses it.
 - It reads the IDs in small steps, so no query runs for long.
-- Each batch is locked, checked again and deleted in its own short transaction. It never waits for a row that Mautic has locked. An address that a visitor or a worker starts to use during the run is kept, and a later run checks it again. The output says how many were kept. `--batch-size=1000` keeps each lock short.
+- Each batch is locked, checked again and deleted in its own short transaction. It skips any address that another transaction holds, and keeps any address that came into use since the IDs were read. The output says how many were kept, and a later run checks them again. `--batch-size=1000` keeps each lock short.
+- One narrow case remains: a Mautic process that looked up an address before the batch, and saves its row after the delete, gets a foreign key error for that one row. A worker retries its message later, and the address is created again.
+- During the batches, the command lowers its own lock waits to 30 seconds and puts them back at the end. A batch that waits longer is rolled back and tried once more, so it never holds its locks for long.
 - Each batch runs at READ COMMITTED, so its delete only holds up new rows that point at an address in the batch. Mautic can keep adding other rows to the tables that use an address.
 - When `--max-rows` stops a run early, the output says the ID it stopped at, so you know which IDs it did not check.
 - If a foreign key to `ip_addresses`, or a table with the same column, is added or dropped during the run, the run stops with an error. Batches already done stay done. Run it again.
@@ -112,6 +114,8 @@ In a crontab, write each `%` as `\%`. This value picks the next slice every day,
 ```
 --ip-slice=$(( $(date +\%s) / 86400 \% 31 + 1 ))/31
 ```
+This value moves to the next slice every day, even when `--max-rows` stopped the slice before. The IDs it did not reach wait until that slice comes back, 31 days later. So set `--max-rows` above what one slice deletes, or leave it out while a large backlog is cleared.
+
 A run without `--ip-slice` checks the whole table in one go. If it stops, run it again. It starts from the first ID again.
 
 `--dry-run` counts what a run would delete, in the same small steps and outside any transaction. It reads as much as a real run, so try it on one slice first.
