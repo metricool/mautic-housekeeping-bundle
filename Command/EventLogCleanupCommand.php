@@ -48,6 +48,8 @@ class EventLogCleanupCommand extends Command
                     new InputOption('email-stats-tokens', 't', InputOption::VALUE_NONE, 'Set only tokens fields in Email Stats Records to NULL. Important: This option can not be combined with any "-c", "-l" or "-m" flag in one command. And: If the option flag "-t" is not set, the NULL setting of tokens will not be done with the basis command, so if you just run mautic:leuchtfeuer:housekeeping without a flag)'),
                     new InputOption('cmp-id', 'i', InputOption::VALUE_OPTIONAL, 'Delete only campaign_lead_eventLog for a specific CampaignID. Implies --campaign-lead.', 'none'),
                     new InputOption('exclude-emails', null, InputOption::VALUE_REQUIRED, 'Comma-separated list of email IDs to exclude from deletion (e.g., 1,44,61). Works with --email-stats, --email-stats-tokens and --page-hits.'),
+                    new InputOption('ip-addresses', null, InputOption::VALUE_NONE, 'Delete the ip_addresses rows that no table uses. A row counts as used when a table with a foreign key to ip_addresses or a '.EventLogCleanup::ARCHIVE_PREFIX.'<table> table points at it. Any other table with the same column stops the run. The newest '.EventLogCleanup::IP_KEEP_NEWEST.' IDs are never touched. Needs --batch-size. Not part of the default cleanup. --days-old has no effect on it.'),
+                    new InputOption('ip-slice', null, InputOption::VALUE_REQUIRED, 'With --ip-addresses, check only slice N of M, for example 5/31. The IDs are cut into blocks of '.EventLogCleanup::IP_SLICE_BLOCK.', and slice N takes block N and every Mth block after it. Off by default, so every ID is checked.'),
                     new InputOption('optimize-tables', 'o', InputOption::VALUE_NONE, 'Optimize all database tables. If no cleanup flag is set, only the optimization runs and no data is deleted.'),
                 ]
             )
@@ -71,6 +73,12 @@ class EventLogCleanupCommand extends Command
 
                 Keep a copy of every row the run removes, in housekeeping_archive_ tables, so it can be put back:
                 <info>php %command.full_name% --page-hits --batch-size=5000 --archive</info>
+
+                Delete the ip_addresses rows that no table uses, in batches, with a copy of each:
+                <info>php %command.full_name% --ip-addresses --batch-size=1000 --archive</info>
+
+                Check only slice 5 of 31 of the ip_addresses IDs, so a nightly run stays short:
+                <info>php %command.full_name% --ip-addresses --ip-slice=5/31 --batch-size=1000</info>
 
                 If you run --optimize-tables on its own, with no other cleanup flag, no data is deleted. Only the table optimization runs:
                 <info>php %command.full_name% --optimize-tables</info>
@@ -116,14 +124,29 @@ class EventLogCleanupCommand extends Command
             return Command::FAILURE;
         }
 
-        $archive = (bool) $input->getOption('archive');
+        $archive     = (bool) $input->getOption('archive');
+        $ipAddresses = (bool) $input->getOption('ip-addresses');
 
-        foreach (['max-rows' => null !== $maxRows, 'archive' => $archive] as $option => $given) {
+        foreach (['max-rows' => null !== $maxRows, 'archive' => $archive, 'ip-addresses' => $ipAddresses] as $option => $given) {
             if ($given && null === $batchSize) {
                 $output->writeln('<error>--'.$option.' needs --batch-size.</error>');
 
                 return Command::FAILURE;
             }
+        }
+
+        $ipSlice = $this->parseIpSlice($input);
+
+        if (false === $ipSlice) {
+            $output->writeln('<error>--ip-slice must be N/M, two whole numbers with N from 1 to M and M from 1 to 1000, for example 5/31.</error>');
+
+            return Command::FAILURE;
+        }
+
+        if (null !== $ipSlice && !$ipAddresses) {
+            $output->writeln('<error>--ip-slice needs --ip-addresses.</error>');
+
+            return Command::FAILURE;
         }
 
         $daysOld                              = (int) $input->getOption('days-old');
@@ -145,6 +168,7 @@ class EventLogCleanupCommand extends Command
             EventLogCleanup::EMAIL_STATS          => $input->getOption('email-stats'),
             EventLogCleanup::EMAIL_STATS_TOKENS   => $input->getOption('email-stats-tokens'),
             EventLogCleanup::PAGE_HITS            => $input->getOption('page-hits'),
+            EventLogCleanup::IP_ADDRESSES         => $ipAddresses,
         ];
 
         $hasCleanupOperations = array_sum($operations) > 0;
@@ -155,6 +179,7 @@ class EventLogCleanupCommand extends Command
             // No flag at all was given. Fall back to the default full cleanup.
             $operations                                      = array_combine(array_keys($operations), array_fill(0, count($operations), true));
             $operations[EventLogCleanup::EMAIL_STATS_TOKENS] = false;
+            $operations[EventLogCleanup::IP_ADDRESSES]       = false;
         }
 
         if ((true === $operations[EventLogCleanup::EMAIL_STATS_TOKENS]) && in_array(true, [$operations[EventLogCleanup::EMAIL_STATS], $operations[EventLogCleanup::CAMPAIGN_LEAD_EVENTS], $operations[EventLogCleanup::LEAD_EVENTS]], true)) {
@@ -165,6 +190,11 @@ class EventLogCleanupCommand extends Command
 
         if (null !== $leadObjects) {
             $this->eventLogCleanup->setLeadObjects($leadObjects);
+        }
+
+        if ($ipAddresses) {
+            [$slice, $slices] = $ipSlice ?? [1, 1];
+            $this->eventLogCleanup->setIpSlice($slice, $slices);
         }
 
         if (array_sum($operations) > 0) {
@@ -273,5 +303,34 @@ class EventLogCleanupCommand extends Command
         $objects = array_filter(array_map(trim(...), explode(',', (string) $rawValue)), static fn (string $object): bool => '' !== $object);
 
         return array_values(array_unique($objects));
+    }
+
+    /**
+     * Reads --ip-slice as slice N of M.
+     *
+     * @param InputInterface $input the command input
+     *
+     * @return array{0: int, 1: int}|false|null the values of N and M, null when the option is not given, false when it is not N/M with N from 1 to M and M from 1 to 1000
+     */
+    private function parseIpSlice(InputInterface $input): array|false|null
+    {
+        $rawValue = $input->getOption('ip-slice');
+
+        if (null === $rawValue) {
+            return null;
+        }
+
+        if (1 !== preg_match('/\A(\d{1,4})\/(\d{1,4})\z/', (string) $rawValue, $matches)) {
+            return false;
+        }
+
+        $slice  = (int) $matches[1];
+        $slices = (int) $matches[2];
+
+        if ($slice < 1 || $slice > $slices || $slices > 1000) {
+            return false;
+        }
+
+        return [$slice, $slices];
     }
 }
