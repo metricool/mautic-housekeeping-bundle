@@ -719,6 +719,7 @@ class EventLogCleanup
 
     /**
      * Deletes the ip_addresses rows that no table uses in this run's slice, or counts them on a dry run.
+     * Before the first batch it lowers the session's lock waits, and puts them back when the run ends or fails.
      *
      * @param bool            $dryRun    true to count only
      * @param int             $batchSize the most rows one batch deletes, unused on a dry run
@@ -771,53 +772,70 @@ class EventLogCleanup
         $total   = 0;
         $kept    = 0;
         $reached = 0;
+        $saved   = null;
 
-        foreach ($ranges as [$from, $to]) {
-            if (0 === $this->rowsLeft) {
-                break;
-            }
-
-            $rangeTotal = 0;
-            $rangeKept  = 0;
-            $lastId     = $from - 1;
-
-            while ($lastId < $to && 0 !== $this->rowsLeft) {
-                $window = ['lastId' => $lastId, 'toId' => min($lastId + self::IP_SCAN_SPAN, $to)];
-
-                if ($dryRun) {
-                    $rangeTotal += (int) $this->connection->executeQuery($countSql, $window, self::IP_WINDOW_TYPES)->fetchOne();
-                    $lastId = $window['toId'];
-
-                    continue;
+        try {
+            foreach ($ranges as [$from, $to]) {
+                if (0 === $this->rowsLeft) {
+                    break;
                 }
 
-                do {
-                    $limit = null === $this->rowsLeft ? $batchSize : min($batchSize, $this->rowsLeft);
-                    $ids   = array_map(intval(...), $this->connection->executeQuery($selectSql.$limit, $window, self::IP_WINDOW_TYPES)->fetchFirstColumn());
+                $rangeTotal = 0;
+                $rangeKept  = 0;
+                $lastId     = $from - 1;
 
-                    if ([] !== $ids) {
-                        $written = $this->writeIpBatch($statements, $ids, $found);
-                        $rangeTotal += $written;
-                        $rangeKept += count($ids) - $written;
+                while ($lastId < $to && 0 !== $this->rowsLeft) {
+                    $window = ['lastId' => $lastId, 'toId' => min($lastId + self::IP_SCAN_SPAN, $to)];
 
-                        if (null !== $this->rowsLeft) {
-                            $this->rowsLeft = max(0, $this->rowsLeft - $written);
-                        }
+                    if ($dryRun) {
+                        $rangeTotal += (int) $this->connection->executeQuery($countSql, $window, self::IP_WINDOW_TYPES)->fetchOne();
+                        $lastId = $window['toId'];
+
+                        continue;
                     }
 
-                    $window['lastId'] = [] !== $ids && count($ids) === $limit ? $ids[count($ids) - 1] : $window['toId'];
-                } while ($window['lastId'] < $window['toId'] && 0 !== $this->rowsLeft);
+                    do {
+                        $limit = null === $this->rowsLeft ? $batchSize : min($batchSize, $this->rowsLeft);
+                        $ids   = array_map(intval(...), $this->connection->executeQuery($selectSql.$limit, $window, self::IP_WINDOW_TYPES)->fetchFirstColumn());
 
-                $lastId = $window['lastId'];
+                        if ([] !== $ids) {
+                            $saved ??= $this->limitIpLockWaits($output);
+                            $written = $this->writeIpBatch($statements, $ids, $found);
+                            $rangeTotal += $written;
+                            $rangeKept += count($ids) - $written;
+
+                            if (null !== $this->rowsLeft) {
+                                $this->rowsLeft = max(0, $this->rowsLeft - $written);
+                            }
+                        }
+
+                        $window['lastId'] = [] !== $ids && count($ids) === $limit ? $ids[count($ids) - 1] : $window['toId'];
+                    } while ($window['lastId'] < $window['toId'] && 0 !== $this->rowsLeft);
+
+                    $lastId = $window['lastId'];
+                }
+
+                if ($output->isVerbose()) {
+                    $output->writeln('IDs '.$from.' to '.$lastId.': '.($dryRun ? $rangeTotal.' would be deleted.' : $rangeTotal.' deleted, '.$rangeKept.' kept for a later run.'));
+                }
+
+                $total += $rangeTotal;
+                $kept += $rangeKept;
+                $reached = $lastId;
+            }
+        } catch (\Throwable $throwable) {
+            if (null !== $saved) {
+                try {
+                    $this->restoreIpLockWaits($saved, $output);
+                } catch (\Throwable) {
+                }
             }
 
-            if ($output->isVerbose()) {
-                $output->writeln('IDs '.$from.' to '.$lastId.': '.($dryRun ? $rangeTotal.' would be deleted.' : $rangeTotal.' deleted, '.$rangeKept.' kept for a later run.'));
-            }
+            throw $throwable;
+        }
 
-            $total += $rangeTotal;
-            $kept += $rangeKept;
-            $reached = $lastId;
+        if (null !== $saved) {
+            $this->restoreIpLockWaits($saved, $output);
         }
 
         if ($upper < 1) {
@@ -997,15 +1015,58 @@ class EventLogCleanup
                     $output->writeln($sql);
                 }
 
-                $this->connection->executeQuery($sql, [], []);
+                $this->connection->executeStatement($sql);
             }
         } finally {
             if ($output->isVerbose()) {
                 $output->writeln($restore);
             }
 
-            $this->connection->executeQuery($restore, [], []);
+            $this->connection->executeStatement($restore);
         }
+    }
+
+    /**
+     * Lowers this session's row and metadata lock waits to IP_LOCK_WAIT_TIMEOUT seconds, so a batch never holds its locks for long while it waits.
+     *
+     * @param OutputInterface $output prints the statement when verbose
+     *
+     * @return array{0: int, 1: int} the session's innodb_lock_wait_timeout and lock_wait_timeout before the change
+     */
+    private function limitIpLockWaits(OutputInterface $output): array
+    {
+        $saved = $this->connection->executeQuery('SELECT @@SESSION.innodb_lock_wait_timeout, @@SESSION.lock_wait_timeout', [], [])->fetchNumeric();
+
+        if (false === $saved) {
+            throw new \RuntimeException('Cannot read the lock wait timeouts of this session.');
+        }
+
+        $sql = 'SET SESSION innodb_lock_wait_timeout = '.self::IP_LOCK_WAIT_TIMEOUT.', lock_wait_timeout = '.self::IP_LOCK_WAIT_TIMEOUT;
+
+        if ($output->isVerbose()) {
+            $output->writeln($sql);
+        }
+
+        $this->connection->executeStatement($sql);
+
+        return [(int) $saved[0], (int) $saved[1]];
+    }
+
+    /**
+     * Puts back this session's row and metadata lock waits.
+     *
+     * @param array{0: int, 1: int} $saved  the innodb_lock_wait_timeout and lock_wait_timeout to put back
+     * @param OutputInterface       $output prints the statement when verbose
+     */
+    private function restoreIpLockWaits(array $saved, OutputInterface $output): void
+    {
+        $sql = 'SET SESSION innodb_lock_wait_timeout = '.$saved[0].', lock_wait_timeout = '.$saved[1];
+
+        if ($output->isVerbose()) {
+            $output->writeln($sql);
+        }
+
+        $this->connection->executeStatement($sql);
     }
 
     /**
@@ -1029,6 +1090,7 @@ class EventLogCleanup
     /**
      * Deletes the rows of one batch that are still unused, and tries the batch once more when a deadlock or a lock wait timeout rolled it back.
      * A row that another transaction holds, or that came into use since the select, is left for a later run.
+     * The run has lowered the lock waits to IP_LOCK_WAIT_TIMEOUT seconds, so a blocked try gives up its locks after that time.
      *
      * @param array{table: string, lock: string, check: string, copy: string|null, delete: string} $statements the statements of this run
      * @param non-empty-list<int>                                                                  $ids        the IDs the select found unused
@@ -1062,7 +1124,7 @@ class EventLogCleanup
     {
         $batchTypes = ['batchIds' => ArrayParameterType::INTEGER];
 
-        $this->connection->executeQuery(self::IP_ISOLATION, [], []);
+        $this->connection->executeStatement(self::IP_ISOLATION);
         $this->connection->beginTransaction();
 
         try {

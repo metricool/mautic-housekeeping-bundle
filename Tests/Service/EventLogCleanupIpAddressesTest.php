@@ -34,7 +34,12 @@ final class EventLogCleanupIpAddressesTest extends TestCase
     private const CHECKED_NONE   = ' The ip_addresses cleanup checked no IDs, because none is older than the newest 1000000.';
     private const KEPT           = ' ip_addresses rows were in use or locked when their batch ran, so they were kept for a later run.';
     private const ISOLATION_SQL  = 'SET TRANSACTION ISOLATION LEVEL READ COMMITTED';
-    private const READ_COMMITTED = [self::ISOLATION_SQL, [], [], null];
+    private const STATEMENT      = 'statement';
+    private const READ_COMMITTED = [self::ISOLATION_SQL, [], [], 0, self::STATEMENT];
+    private const WAITS_SQL      = 'SELECT @@SESSION.innodb_lock_wait_timeout, @@SESSION.lock_wait_timeout';
+    private const LIMIT_SQL      = 'SET SESSION innodb_lock_wait_timeout = 30, lock_wait_timeout = 30';
+    private const RESTORE_SQL    = 'SET SESSION innodb_lock_wait_timeout = 50, lock_wait_timeout = 3600';
+    private const WAITS_RESTORED = [self::RESTORE_SQL, [], [], 0, self::STATEMENT];
 
     /**
      * @var list<string>
@@ -148,9 +153,9 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             [self::IP_TABLES_SQL, ['columns' => ['ip_id']], ['columns' => ArrayParameterType::STRING], self::rows('prefix_table_page_hits', 'prefix_table_email_stats', 'prefix_table_housekeeping_archive_page_hits', 'prefix_table_housekeeping_archive_email_stats_devices')],
             [self::IP_INDEXES_SQL, ['columns' => ['ip_id']], ['columns' => ArrayParameterType::STRING], self::rows('prefix_table_page_hits', 'prefix_table_email_stats', 'prefix_table_housekeeping_archive_page_hits')],
             ['SELECT @@SESSION.lock_wait_timeout', [], [], '50'],
-            ['SET SESSION lock_wait_timeout = 30', [], [], null],
-            ['ALTER TABLE prefix_table_housekeeping_archive_email_stats_devices ADD INDEX housekeeping_ip_id (ip_id), ALGORITHM=INPLACE, LOCK=NONE', [], [], null],
-            ['SET SESSION lock_wait_timeout = 50', [], [], null],
+            self::statement('SET SESSION lock_wait_timeout = 30'),
+            self::statement('ALTER TABLE prefix_table_housekeeping_archive_email_stats_devices ADD INDEX housekeeping_ip_id (ip_id), ALGORITHM=INPLACE, LOCK=NONE'),
+            self::statement('SET SESSION lock_wait_timeout = 50'),
             [self::MAX_SQL, [], [], null],
         ], 0, 0, 0);
 
@@ -167,9 +172,9 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             [self::IP_TABLES_SQL, ['columns' => ['ip_id']], ['columns' => ArrayParameterType::STRING], self::rows('prefix_table_page_hits', 'prefix_table_email_stats', 'prefix_table_housekeeping_archive_page_hits')],
             [self::IP_INDEXES_SQL, ['columns' => ['ip_id']], ['columns' => ArrayParameterType::STRING], self::rows('prefix_table_page_hits', 'prefix_table_email_stats')],
             ['SELECT @@SESSION.lock_wait_timeout', [], [], '50'],
-            ['SET SESSION lock_wait_timeout = 30', [], [], null],
-            ['ALTER TABLE prefix_table_housekeeping_archive_page_hits ADD INDEX housekeeping_ip_id (ip_id), ALGORITHM=INPLACE, LOCK=NONE', [], [], new \RuntimeException('Lock wait timeout exceeded')],
-            ['SET SESSION lock_wait_timeout = 50', [], [], null],
+            self::statement('SET SESSION lock_wait_timeout = 30'),
+            self::statement('ALTER TABLE prefix_table_housekeeping_archive_page_hits ADD INDEX housekeeping_ip_id (ip_id), ALGORITHM=INPLACE, LOCK=NONE', new \RuntimeException('Lock wait timeout exceeded')),
+            self::statement('SET SESSION lock_wait_timeout = 50'),
         ], 0, 0, 0);
 
         $this->expectException(\RuntimeException::class);
@@ -262,6 +267,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $connection = $this->createIpConnection([
             ...self::usersFound(),
             self::select(0, 10000, ['10']),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
@@ -269,11 +275,12 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::batch(self::DELETE_SQL, [10], 1),
             self::select(10000, 20000, []),
             self::select(20000, 25000, []),
+            self::WAITS_RESTORED,
         ], 1, 1, 0);
 
         $this->assertSame('1 ip_addresses rows have been deleted.'.self::CHECKED_ALL, $this->runIpCleanup($connection));
         $this->assertSame(
-            [self::IP_KEYS_SQL, self::IP_TABLES_SQL, self::MAX_SQL, self::selectSql(2), self::ISOLATION_SQL, 'begin', self::LOCK_SQL, self::CHECK_SQL, self::IP_KEYS_SQL, self::IP_TABLES_SQL, self::DELETE_SQL, 'commit', self::selectSql(2), self::selectSql(2)],
+            [self::IP_KEYS_SQL, self::IP_TABLES_SQL, self::MAX_SQL, self::selectSql(2), self::WAITS_SQL, self::LIMIT_SQL, self::ISOLATION_SQL, 'begin', self::LOCK_SQL, self::CHECK_SQL, self::IP_KEYS_SQL, self::IP_TABLES_SQL, self::DELETE_SQL, 'commit', self::selectSql(2), self::selectSql(2), self::RESTORE_SQL],
             $this->events
         );
     }
@@ -286,6 +293,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $connection = $this->createIpConnection([
             ...self::usersFound(),
             self::select(0, 10000, ['10', '20', '30'], 5),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10, 20, 30], ['10', '30']),
             self::batch(self::CHECK_SQL, [10, 30], ['30']),
@@ -293,6 +301,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::batch(self::DELETE_SQL, [30], 1),
             self::select(10000, 20000, [], 5),
             self::select(20000, 25000, [], 5),
+            self::WAITS_RESTORED,
         ], 1, 1, 0);
 
         $this->assertSame('1 ip_addresses rows have been deleted.'.self::CHECKED_ALL.' 2'.self::KEPT, $this->runIpCleanup($connection, 5));
@@ -306,10 +315,12 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $connection = $this->createIpConnection([
             ...self::usersFound(),
             self::select(0, 10000, ['10', '20'], 5),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10, 20], []),
             self::select(10000, 20000, [], 5),
             self::select(20000, 25000, [], 5),
+            self::WAITS_RESTORED,
         ], 1, 1, 0);
 
         $this->assertSame('0 ip_addresses rows have been deleted.'.self::CHECKED_ALL.' 2'.self::KEPT, $this->runIpCleanup($connection, 5));
@@ -323,6 +334,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $connection = $this->createIpConnection([
             ...self::usersFound(),
             self::select(0, 10000, ['10', '20']),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10, 20], ['10', '20']),
             self::batch(self::CHECK_SQL, [10, 20], ['10', '20']),
@@ -331,6 +343,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::select(20, 10000, []),
             self::select(10000, 20000, []),
             self::select(20000, 25000, []),
+            self::WAITS_RESTORED,
         ], 1, 1, 0);
 
         $this->assertSame('2 ip_addresses rows have been deleted.'.self::CHECKED_ALL, $this->runIpCleanup($connection));
@@ -344,6 +357,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $connection = $this->createIpConnection([
             ...self::usersFound(),
             self::select(0, 10000, ['10', '20']),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10, 20], ['10', '20']),
             self::batch(self::CHECK_SQL, [10, 20], ['10', '20']),
@@ -355,6 +369,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::batch(self::CHECK_SQL, [30], ['30']),
             ...self::relist(),
             self::batch(self::DELETE_SQL, [30], 1),
+            self::WAITS_RESTORED,
         ], 2, 2, 0);
 
         $lines = [];
@@ -375,11 +390,13 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $connection = $this->createIpConnection([
             ...self::usersFound('1250000'),
             self::select(100000, 110000, ['100010'], 1),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [100010], ['100010']),
             self::batch(self::CHECK_SQL, [100010], ['100010']),
             ...self::relist(),
             self::batch(self::DELETE_SQL, [100010], 1),
+            self::WAITS_RESTORED,
         ], 1, 1, 0);
 
         $lines           = [];
@@ -403,11 +420,13 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::select(0, 10000, [], 1),
             self::select(10000, 20000, [], 1),
             self::select(20000, 25000, ['25000'], 1),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [25000], ['25000']),
             self::batch(self::CHECK_SQL, [25000], ['25000']),
             ...self::relist(),
             self::batch(self::DELETE_SQL, [25000], 1),
+            self::WAITS_RESTORED,
         ], 1, 1, 0);
 
         $this->assertSame(
@@ -424,6 +443,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $connection = $this->createIpConnection([
             ...self::usersFound(),
             self::select(0, 10000, ['10']),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], self::deadlock()),
             self::READ_COMMITTED,
@@ -433,6 +453,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::batch(self::DELETE_SQL, [10], 1),
             self::select(10000, 20000, []),
             self::select(20000, 25000, []),
+            self::WAITS_RESTORED,
         ], 2, 1, 1);
 
         $logger = $this->createMock(LoggerInterface::class);
@@ -454,10 +475,33 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $connection = $this->createIpConnection([
             ...self::usersFound(),
             self::select(0, 10000, ['10']),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], self::deadlock()),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], self::deadlock()),
+            self::WAITS_RESTORED,
+        ], 2, 0, 2);
+
+        $this->expectException(DeadlockException::class);
+
+        $this->runIpCleanup($connection);
+    }
+
+    /**
+     * Throws the batch's own error when the lock waits cannot be put back after it.
+     */
+    public function testKeepsTheBatchErrorWhenTheLockWaitsCannotBePutBack(): void
+    {
+        $connection = $this->createIpConnection([
+            ...self::usersFound(),
+            self::select(0, 10000, ['10']),
+            ...self::waitsLimited(),
+            self::READ_COMMITTED,
+            self::batch(self::LOCK_SQL, [10], self::deadlock()),
+            self::READ_COMMITTED,
+            self::batch(self::LOCK_SQL, [10], self::deadlock()),
+            self::statement(self::RESTORE_SQL, new \RuntimeException('MySQL server has gone away')),
         ], 2, 0, 2);
 
         $this->expectException(DeadlockException::class);
@@ -473,10 +517,12 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $connection = $this->createIpConnection([
             ...self::usersFound(),
             self::select(0, 10000, ['10']),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
             ...self::relist(self::rows('prefix_table_page_hits', 'prefix_table_email_stats', 'prefix_table_housekeeping_archive_page_hits')),
+            self::WAITS_RESTORED,
         ], 1, 0, 1);
 
         $this->expectException(\RuntimeException::class);
@@ -493,10 +539,12 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $connection = $this->createIpConnection([
             ...self::usersFound(),
             self::select(0, 10000, ['10']),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
             [self::IP_KEYS_SQL, ['table' => 'prefix_table_ip_addresses'], ['table' => \PDO::PARAM_STR], [...self::keys(), self::key('prefix_table_visits', 'address_id')]],
+            self::WAITS_RESTORED,
         ], 1, 0, 1);
 
         $this->expectException(\RuntimeException::class);
@@ -513,11 +561,13 @@ final class EventLogCleanupIpAddressesTest extends TestCase
         $connection = $this->createIpConnection([
             ...self::usersFound(),
             self::select(0, 10000, ['10']),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
             ...self::relist(),
             self::batch(self::DELETE_SQL, [10], 0),
+            self::WAITS_RESTORED,
         ], 1, 0, 1);
 
         $this->expectException(\RuntimeException::class);
@@ -535,6 +585,7 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             ...self::archivePrepared(),
             ...self::usersFound(),
             self::select(0, 10000, ['10']),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
@@ -543,13 +594,14 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             self::batch(self::DELETE_SQL, [10], 1),
             self::select(10000, 20000, []),
             self::select(20000, 25000, []),
+            self::WAITS_RESTORED,
         ], 1, 1, 0);
 
         $this->assertSame(
             '1 ip_addresses rows have been deleted. Every deleted or changed row was copied to a housekeeping_archive_ table first.'.self::CHECKED_ALL,
             $this->runIpCleanup($connection, 2, null, true)
         );
-        $this->assertSame([self::ISOLATION_SQL, 'begin', self::LOCK_SQL, self::CHECK_SQL, self::IP_KEYS_SQL, self::IP_TABLES_SQL, self::COPY_SQL, self::DELETE_SQL, 'commit'], array_slice($this->events, 7, 9));
+        $this->assertSame([self::ISOLATION_SQL, 'begin', self::LOCK_SQL, self::CHECK_SQL, self::IP_KEYS_SQL, self::IP_TABLES_SQL, self::COPY_SQL, self::DELETE_SQL, 'commit'], array_slice($this->events, 9, 9));
         $this->assertNotContains(self::KEYS_SQL, $this->events);
     }
 
@@ -562,12 +614,14 @@ final class EventLogCleanupIpAddressesTest extends TestCase
             ...self::archivePrepared(),
             ...self::usersFound(),
             self::select(0, 10000, ['10']),
+            ...self::waitsLimited(),
             self::READ_COMMITTED,
             self::batch(self::LOCK_SQL, [10], ['10']),
             self::batch(self::CHECK_SQL, [10], ['10']),
             ...self::relist(),
             self::batch(self::COPY_SQL, [10], 0),
             self::batch(self::DELETE_SQL, [10], 1),
+            self::WAITS_RESTORED,
         ], 1, 0, 1);
 
         $this->expectException(\RuntimeException::class);
@@ -807,6 +861,32 @@ final class EventLogCleanupIpAddressesTest extends TestCase
     }
 
     /**
+     * Returns the read of the session's lock waits and the statement that lowers them, which run just before the first batch.
+     *
+     * @return list<list<mixed>> the query and the statement with their answers
+     */
+    private static function waitsLimited(): array
+    {
+        return [
+            [self::WAITS_SQL, [], [], ['50', '3600']],
+            [self::LIMIT_SQL, [], [], 0, self::STATEMENT],
+        ];
+    }
+
+    /**
+     * Returns a statement sent with executeStatement and what it returns or throws.
+     *
+     * @param string $sql    the statement
+     * @param mixed  $answer the affected row count, or a throwable to throw
+     *
+     * @return list<mixed> the statement with its answer
+     */
+    private static function statement(string $sql, mixed $answer = 0): array
+    {
+        return [$sql, [], [], $answer, self::STATEMENT];
+    }
+
+    /**
      * Returns the queries that read the keys and list the tables with the address column again inside a batch.
      *
      * @param list<array{table_name: string, column_name: string}>|null $rows the tables it finds, by default the same as at the start
@@ -904,12 +984,34 @@ final class EventLogCleanupIpAddressesTest extends TestCase
 
                 return true;
             });
-        $connection->expects($this->exactly(count($calls)))
+        $statements = count(array_filter($calls, static fn (array $call): bool => self::STATEMENT === ($call[4] ?? null)));
+
+        $connection->expects($this->exactly($statements))
+            ->method('executeStatement')
+            ->willReturnCallback(function (string $sql, array $params = [], array $types = []) use (&$calls): int {
+                $call = array_shift($calls);
+
+                self::assertNotNull($call, 'Unexpected statement: '.$sql);
+                self::assertSame(self::STATEMENT, $call[4] ?? null, 'Expected a query, got the statement: '.$sql);
+                self::assertSame($call[0], $sql);
+                self::assertSame($call[1], $params);
+                self::assertSame($call[2], $types);
+
+                $this->events[] = $sql;
+
+                if ($call[3] instanceof \Throwable) {
+                    throw $call[3];
+                }
+
+                return is_int($call[3]) ? $call[3] : 0;
+            });
+        $connection->expects($this->exactly(count($calls) - $statements))
             ->method('executeQuery')
             ->willReturnCallback(function (string $sql, array $params, array $types) use (&$calls): Result {
                 $call = array_shift($calls);
 
                 self::assertNotNull($call, 'Unexpected query: '.$sql);
+                self::assertNull($call[4] ?? null, 'Expected a statement, got the query: '.$sql);
                 self::assertSame($call[0], $sql);
                 self::assertSame($call[1], $params);
                 self::assertSame($call[2], $types);
