@@ -104,9 +104,10 @@ A segment can filter on one email, with "Read a specific email" or "Was sent a s
 - When the run starts, before it deletes anything, it reads the filters of every segment, published or not. Every email they name is excluded, as if it were in `--exclude-emails`. It adds to `--exclude-emails` and works with the same options: `--email-stats`, `--email-stats-tokens` and `--page-hits`.
 - It reads the `lead_email_received` and `lead_email_sent` filters, with any operator. A plugin can add a filter whose values are email IDs too, for example one on clicks in `page_hits`. Add its field name to the option, comma-separated: `--exclude-segment-emails=plugin_email_clicked`.
 - If the filters of a segment cannot be read, or one of these filters holds a value that is not an email ID, the run stops with an error before it deletes anything.
-- Filters such as "Read any email (date)", "Read any email X number of times" or "Clicked any link from any email" read the same rows without naming an email. No email ID can keep these segments as they are, so the output lists them in a warning.
+- Filters such as "Read any email (date)", "Read any email X number of times" or "Clicked any link from any email" read the same rows without naming an email. So do these filters with the "empty" or "not empty" operator, because Mautic then ignores their value. No email ID can keep these segments as they are, so the output lists them in a warning.
+- A filter with no field name stops the run before it deletes anything too. Filters that a custom operator filter holds are read like any other filter.
 - The filters are read once per run. A filter added during a run counts from the next run.
-- With `--unlink-segments`, a named email keeps its rows and segments, and so do its variants and translations.
+- With `--unlink-segments`, the variants and translations of a named email keep their `email_stats` rows and their segments too.
 ```
 bin/console leuchtfeuer:housekeeping --email-stats --page-hits --exclude-segment-emails --days-old=365 --batch-size=5000
 ```

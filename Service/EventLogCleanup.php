@@ -39,6 +39,16 @@ class EventLogCleanup
      */
     private const SEGMENT_EMAIL_ACTIVITY_FIELDS = ['email_clicked_link_date', 'email_id', 'lead_email_read_count', 'lead_email_read_date', 'lead_email_sent_date'];
 
+    /**
+     * The segment filter operators whose query ignores the filter's value.
+     */
+    private const SEGMENT_VALUELESS_OPERATORS = ['empty', '!empty'];
+
+    /**
+     * The segment filter operator that holds a list of filters in its properties.
+     */
+    private const SEGMENT_CUSTOM_OPERATOR = 'custom_operator';
+
     public const IP_ADDRESSES          = 'ip_addresses';
     public const IP_KEEP_NEWEST        = 1000000;
     public const IP_SLICE_BLOCK        = 100000;
@@ -229,8 +239,9 @@ class EventLogCleanup
 
     /**
      * Reads the filters of every segment, published or not, and collects the email IDs that the filters on these fields name.
-     * It also lists the segments with a filter on email activity that names no email, such as a date or a count, because no email ID can keep them as they are.
-     * It rejects a segment whose filters cannot be read, and a value of these fields that is not an email ID.
+     * It also lists the segments with a filter on email activity that names no email, such as a date, a count, or one of these fields with the empty or not empty operator,
+     * because no email ID can keep them as they are.
+     * It rejects a segment whose filters cannot be read, a filter with no field name, and a value of these fields that is not an email ID.
      *
      * @param list<string> $fields the filter fields whose values are email IDs
      *
@@ -245,17 +256,19 @@ class EventLogCleanup
         foreach ($rows as $row) {
             $segmentId = (int) $row['id'];
 
-            foreach ($this->filtersOf($segmentId, $row['filters']) as $filter) {
-                $field = is_array($filter) ? ($filter['field'] ?? null) : null;
-
-                if (!is_array($filter) || !is_string($field)) {
-                    continue;
-                }
+            foreach ($this->flatFilters($segmentId, $this->filtersOf($segmentId, $row['filters'])) as $filter) {
+                $field = $filter['field'];
 
                 if (!in_array($field, $fields, true)) {
                     if (in_array($field, self::SEGMENT_EMAIL_ACTIVITY_FIELDS, true)) {
                         $segments[$segmentId] = true;
                     }
+
+                    continue;
+                }
+
+                if (in_array($filter['operator'] ?? null, self::SEGMENT_VALUELESS_OPERATORS, true)) {
+                    $segments[$segmentId] = true;
 
                     continue;
                 }
@@ -1098,6 +1111,36 @@ class EventLogCleanup
         }
 
         return $filters;
+    }
+
+    /**
+     * Lists the filters of a segment one by one, with the filters that a custom operator filter holds in its properties in its place.
+     * Rejects a filter that is not an array or has no field name, because what it reads cannot be known.
+     *
+     * @param int          $segmentId the segment the filters belong to
+     * @param array<mixed> $filters   the filters as stored
+     *
+     * @return list<array<mixed>> the filters, each with a string field name
+     */
+    private function flatFilters(int $segmentId, array $filters): array
+    {
+        $flat = [];
+
+        foreach ($filters as $filter) {
+            if (is_array($filter) && self::SEGMENT_CUSTOM_OPERATOR === ($filter['operator'] ?? null) && is_array($filter['properties'] ?? null)) {
+                array_push($flat, ...$this->flatFilters($segmentId, $filter['properties']));
+
+                continue;
+            }
+
+            if (!is_array($filter) || !isset($filter['field']) || !is_string($filter['field'])) {
+                throw new \UnexpectedValueException('Segment '.$segmentId.' has a filter that cannot be read.');
+            }
+
+            $flat[] = $filter;
+        }
+
+        return $flat;
     }
 
     /**

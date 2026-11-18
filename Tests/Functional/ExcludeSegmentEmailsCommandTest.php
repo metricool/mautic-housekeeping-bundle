@@ -186,22 +186,85 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
     {
         $this->fixtureHelper->enablePlugin();
 
-        $dateSegment  = $this->fixtureHelper->createSegment('segment-date', [$this->filter('lead_email_read_date', '2025-01-01', 'gt')]);
-        $emptySegment = $this->fixtureHelper->createSegment('segment-empty', [$this->filter('lead_email_received', null, 'empty')]);
+        $contact         = $this->fixtureHelper->createContact('segment-no-email@test.com');
+        $email           = $this->fixtureHelper->createEmail('Segment Stale Value Email', false);
+        $stat            = $this->fixtureHelper->createEmailStat($contact, $email, $this->fixtureHelper->daysAgo(400));
+        $dateSegment     = $this->fixtureHelper->createSegment('segment-date', [$this->filter('lead_email_read_date', '2025-01-01', 'gt')]);
+        $emptySegment    = $this->fixtureHelper->createSegment('segment-empty', [$this->filter('lead_email_received', ['first-email'], 'empty')]);
+        $notEmptySegment = $this->fixtureHelper->createSegment('segment-not-empty', [$this->filter('lead_email_sent', [(string) $email->getId()], '!empty')]);
 
-        $this->fixtureHelper->createSegment('segment-unrelated', [$this->filter('city', 'Berlin', 'eq')]);
+        $this->fixtureHelper->createSegment('segment-unrelated', [$this->filter('city', 'Berlin', '=')]);
 
         $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--exclude-segment-emails' => null,
-            '--dry-run'                => true,
         ]);
+
+        $this->em->clear();
+
+        $this->assertNull($this->em->getRepository(EmailStat::class)->find($stat->getId()));
 
         $output = $commandTester->getDisplay();
         $this->assertStringContainsString('Segment filters name 0 emails, which the run excludes too.', $output);
-        $this->assertStringContainsString('Warning: segments '.$dateSegment->getId().', '.$emptySegment->getId().' filter on email activity without naming an email', $output);
+        $this->assertStringContainsString('Warning: segments '.$dateSegment->getId().', '.$emptySegment->getId().', '.$notEmptySegment->getId().' filter on email activity without naming an email', $output);
         $this->assertSame(0, $commandTester->getStatusCode());
+    }
+
+    public function testReadsTheFiltersHeldByACustomOperator(): void
+    {
+        $this->fixtureHelper->enablePlugin();
+
+        $contact = $this->fixtureHelper->createContact('segment-custom-operator@test.com');
+        $named   = $this->fixtureHelper->createEmail('Segment Custom Operator Email', false);
+        $stat    = $this->fixtureHelper->createEmailStat($contact, $named, $this->fixtureHelper->daysAgo(400));
+
+        $this->fixtureHelper->createSegment('segment-custom-operator', [[
+            'glue'       => 'and',
+            'operator'   => 'custom_operator',
+            'properties' => [
+                ['glue' => 'or', 'field' => 'city', 'object' => 'lead', 'type' => 'text', 'operator' => '=', 'filter' => 'Berlin'],
+                ['glue' => 'or', 'field' => 'lead_email_sent', 'object' => 'behaviors', 'type' => 'lead_email_sent', 'operator' => 'in', 'filter' => [(string) $named->getId()]],
+            ],
+        ]]);
+
+        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            '--days-old'               => 30,
+            '--email-stats'            => true,
+            '--exclude-segment-emails' => null,
+        ]);
+
+        $this->em->clear();
+
+        $this->assertNotNull($this->em->getRepository(EmailStat::class)->find($stat->getId()));
+        $this->assertStringContainsString('Segment filters name 1 emails, which the run excludes too: '.$named->getId().'.', $commandTester->getDisplay());
+        $this->assertSame(0, $commandTester->getStatusCode());
+    }
+
+    public function testStopsBeforeAnyWriteWhenAFilterHasNoField(): void
+    {
+        $this->fixtureHelper->enablePlugin();
+
+        $contact = $this->fixtureHelper->createContact('segment-no-field@test.com');
+        $email   = $this->fixtureHelper->createEmail('Segment No Field Email', false);
+        $stat    = $this->fixtureHelper->createEmailStat($contact, $email, $this->fixtureHelper->daysAgo(400));
+        $segment = $this->fixtureHelper->createSegment('segment-no-field', [[
+            'glue'       => 'and',
+            'operator'   => 'in',
+            'properties' => ['filter' => [(string) $email->getId()]],
+        ]]);
+
+        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            '--days-old'               => 30,
+            '--email-stats'            => true,
+            '--exclude-segment-emails' => null,
+        ]);
+
+        $this->em->clear();
+
+        $this->assertNotNull($this->em->getRepository(EmailStat::class)->find($stat->getId()));
+        $this->assertStringContainsString('Nothing was deleted, because the segment filters could not be read: Segment '.$segment->getId().' has a filter that cannot be read.', $commandTester->getDisplay());
+        $this->assertSame(1, $commandTester->getStatusCode());
     }
 
     public function testStopsBeforeAnyWriteWhenAFilterValueIsNotAnEmailId(): void
