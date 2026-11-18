@@ -14,6 +14,7 @@ use Mautic\EmailBundle\Entity\Stat as EmailStat;
 use Mautic\EmailBundle\Entity\StatDevice;
 use Mautic\LeadBundle\Entity\Lead;
 use Mautic\LeadBundle\Entity\LeadEventLog;
+use Mautic\LeadBundle\Entity\LeadList;
 use Mautic\PageBundle\Entity\Hit;
 use Mautic\PluginBundle\Entity\Integration;
 use Mautic\PluginBundle\Entity\Plugin;
@@ -129,6 +130,63 @@ final class FixtureHelper
         if (null !== $publishDown) {
             $email->setPublishDown($publishDown);
         }
+        $this->em->persist($email);
+        $this->em->flush();
+
+        return $email;
+    }
+
+    /**
+     * Saves a segment with no filters.
+     *
+     * @param string $alias the segment's name and alias
+     *
+     * @return LeadList the saved segment
+     */
+    public function createSegment(string $alias): LeadList
+    {
+        $segment = new LeadList();
+        $segment->setName($alias);
+        $segment->setPublicName($alias);
+        $segment->setAlias($alias);
+        $segment->setFilters([]);
+        $this->em->persist($segment);
+        $this->em->flush();
+
+        return $segment;
+    }
+
+    /**
+     * Saves a segment email sent to these segments, as an A/B variant or a translation of another email when one is given.
+     *
+     * @param string         $name          the email's name and subject
+     * @param bool           $isPublished   whether the email is published
+     * @param list<LeadList> $segments      the segments the email is sent to
+     * @param Email|null     $variantOf     the email this one is an A/B variant of
+     * @param Email|null     $translationOf the email this one is a translation of
+     *
+     * @return Email the saved email
+     */
+    public function createSegmentEmail(string $name, bool $isPublished, array $segments, ?Email $variantOf = null, ?Email $translationOf = null): Email
+    {
+        $email = new Email();
+        $email->setName($name);
+        $email->setSubject($name);
+        $email->setEmailType('list');
+        $email->setIsPublished($isPublished);
+
+        foreach ($segments as $segment) {
+            $email->addList($segment);
+        }
+
+        if (null !== $variantOf) {
+            $email->setVariantParent($variantOf);
+        }
+
+        if (null !== $translationOf) {
+            $email->setTranslationParent($translationOf);
+        }
+
         $this->em->persist($email);
         $this->em->flush();
 
