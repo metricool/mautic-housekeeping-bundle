@@ -29,6 +29,7 @@ class EventLogCleanup
     private const EMAIL_STATS_DEVICES = 'email_stats_devices';
     public const PAGE_HITS            = 'page_hits';
     public const ARCHIVE_PREFIX       = 'housekeeping_archive_';
+    public const EMAIL_LIST_XREF      = 'email_list_xref';
     private const ID_RANGE_TYPES      = ['fromId' => \PDO::PARAM_INT, 'toId' => \PDO::PARAM_INT];
     private const MAX_ID_SPAN         = 50000;
 
@@ -141,6 +142,25 @@ class EventLogCleanup
 
     private string $ipMessage = '';
 
+    private bool $unlinkSegments = false;
+
+    /**
+     * @var array<int, int>
+     */
+    private array $familyRoots = [];
+
+    /**
+     * @var array<int, list<int>>
+     */
+    private array $familyMembers = [];
+
+    private int $unlinkedLinks = 0;
+
+    /**
+     * @var array<int, true>
+     */
+    private array $unlinkedEmails = [];
+
     public function __construct(private readonly Connection $connection, ?string $dbPrefix, private readonly Config $config, private readonly LoggerInterface $logger)
     {
         $this->dbPrefix = $dbPrefix ?? '';
@@ -170,6 +190,17 @@ class EventLogCleanup
 
         $this->ipSlice  = $slice;
         $this->ipSlices = $slices;
+    }
+
+    /**
+     * Makes the email_stats cleanup remove the segments of each email whose stats it deletes, and of that email's variants and translations,
+     * and keep the stats of a closed email while one of its variants or translations is still open.
+     *
+     * @param bool $unlinkSegments true to remove the segments in the same transaction as the stats
+     */
+    public function setUnlinkSegments(bool $unlinkSegments): void
+    {
+        $this->unlinkSegments = $unlinkSegments;
     }
 
     /**
@@ -248,6 +279,19 @@ class EventLogCleanup
             }
         }
 
+        $unlinkSegments       = $this->unlinkSegments && ($operations[self::EMAIL_STATS] ?? false);
+        $this->unlinkedLinks  = 0;
+        $this->unlinkedEmails = [];
+        $keptEmails           = 0;
+
+        if ($unlinkSegments) {
+            if (!$dryRun && null === $batchSize) {
+                throw new \InvalidArgumentException('Removing the segments needs a batch size.');
+            }
+
+            $keptEmails = $this->prepareSegmentUnlink($dryRun);
+        }
+
         $result = [
             self::CAMPAIGN_LEAD_EVENTS => 0,
             self::LEAD_EVENTS          => 0,
@@ -279,6 +323,10 @@ class EventLogCleanup
                 if ($output->isVerbose()) {
                     $output->writeln($sql);
                 }
+            }
+
+            if ($unlinkSegments) {
+                $this->countSegmentLinks();
             }
         } elseif (null !== $batchSize) {
             foreach ($operations as $operation => $enabled) {
@@ -344,6 +392,10 @@ class EventLogCleanup
         $message = $this->generateMessage($operationsResult['delete'], $dryRun ? $this->dryRunDeleteMessage : $this->runDeleteMessage);
         if ('' !== $updateMessage = $this->generateMessage($operationsResult['update'], $dryRun ? $this->dryRunUpdateMessage : $this->runUpdateMessage)) {
             $message .= ' '.$updateMessage;
+        }
+
+        if ($unlinkSegments) {
+            $message .= $this->segmentMessage($dryRun, $keptEmails);
         }
 
         if ($dryRun) {
@@ -431,6 +483,7 @@ class EventLogCleanup
             'match'   => 'SELECT '.$idColumn.' FROM '.$rows.' ORDER BY '.$idColumn.' FOR UPDATE',
             'write'   => 'DELETE LOW_PRIORITY '.$table.' FROM '.$template.$idRange,
             'archive' => $this->archive ? $this->prepareArchive($operation, $table, $rows) : null,
+            'emails'  => $this->unlinkSegments && self::EMAIL_STATS === $operation ? 'SELECT DISTINCT '.$table.'.email_id FROM '.$rows : null,
         ];
 
         if (array_key_exists($operation, $this->update)) {
@@ -593,12 +646,13 @@ class EventLogCleanup
      * Locks, checks and writes one batch in a single transaction, and with the archive on copies it first.
      * It locks the rows of the batch's ID range that still match, in ID order. If more match than the row limit has left,
      * the range ends at the last row the limit allows, so a row that started to match after the select cannot take the run past it.
+     * With the segment unlink on, it removes the segments of the batch's emails before anything else is written.
      * With the archive on it then locks and copies their child rows and copies the rows themselves.
      * Every row stays locked from its copy to the write, whatever the isolation level, so the archive holds the values that were removed.
      * If the write or a copy counts differently from the rows locked, the batch is rolled back.
      *
-     * @param array{table: string, match: string, write: string, archive: array{copy: string, children: list<array{table: string, source: string, column: string}>}|null} $statements
-     * @param array{fromId: int, toId: int}                                                                                                                               $range
+     * @param array{table: string, match: string, write: string, archive: array{copy: string, children: list<array{table: string, source: string, column: string}>}|null, emails: string|null} $statements
+     * @param array{fromId: int, toId: int}                                                                                                                                                    $range
      */
     private function writeBatch(string $operation, array $statements, array $range): int
     {
@@ -620,6 +674,10 @@ class EventLogCleanup
             $writtenRows = 0;
 
             if ([] !== $matchingIds) {
+                if (null !== $statements['emails']) {
+                    $this->unlinkSegmentsOf($statements['emails'], $params, $types);
+                }
+
                 foreach (null === $archive ? [] : $archive['children'] as $child) {
                     $lockedRows = (int) $this->connection->executeQuery(
                         'SELECT COUNT(*) FROM '.$child['source'].' WHERE '.$child['column'].' IN (:batchIds) FOR UPDATE',
@@ -669,6 +727,216 @@ class EventLogCleanup
     private function archiveTableName(string $name): string
     {
         return $this->dbPrefix.self::ARCHIVE_PREFIX.$name;
+    }
+
+    /**
+     * Reads which variants and translations belong together, and keeps the email_stats of each closed email whose family still has an open email.
+     * Outside a dry run it also creates the archive table for the removed segment links, and rejects one whose columns no longer match.
+     *
+     * @param bool $dryRun true to only count, so no table is created
+     *
+     * @return int how many closed emails keep their email_stats because their family has an open email
+     */
+    private function prepareSegmentUnlink(bool $dryRun): int
+    {
+        $emails = $this->connection->executeQuery(
+            'SELECT id, variant_parent_id, translation_parent_id, (is_published = 0 OR publish_down < DATE_SUB(NOW(),INTERVAL :daysOld DAY)) AS closed FROM '.$this->dbPrefix.'emails',
+            ['daysOld' => $this->params[self::EMAIL_STATS]['daysOld']],
+            ['daysOld' => \PDO::PARAM_INT]
+        )->fetchAllAssociative();
+
+        $parents = [];
+
+        foreach ($emails as $email) {
+            $id = (int) $email['id'];
+            $parents[$id] ??= $id;
+
+            foreach ([$email['variant_parent_id'], $email['translation_parent_id']] as $parentId) {
+                if (null === $parentId) {
+                    continue;
+                }
+
+                $parents[(int) $parentId] ??= (int) $parentId;
+                $childRoot           = $this->findRoot($parents, $id);
+                $parentRoot          = $this->findRoot($parents, (int) $parentId);
+                $parents[$childRoot] = $parentRoot;
+            }
+        }
+
+        $this->familyRoots   = [];
+        $this->familyMembers = [];
+        $openFamilies        = [];
+        $closedEmails        = [];
+
+        foreach ($emails as $email) {
+            $id                           = (int) $email['id'];
+            $root                         = $this->findRoot($parents, $id);
+            $this->familyRoots[$id]       = $root;
+            $this->familyMembers[$root][] = $id;
+
+            if (1 === (int) $email['closed']) {
+                $closedEmails[] = $id;
+            } else {
+                $openFamilies[$root] = true;
+            }
+        }
+
+        $keptEmails = array_values(array_filter($closedEmails, fn (int $id): bool => isset($openFamilies[$this->familyRoots[$id]])));
+
+        if ([] !== $keptEmails) {
+            $this->queriesTemplate[self::EMAIL_STATS] .= ' AND ('.self::PREFIX.'email_stats.email_id IS NULL OR '.self::PREFIX.'email_stats.email_id NOT IN (:openFamilyEmailIds))';
+            $this->params[self::EMAIL_STATS]['openFamilyEmailIds'] = $keptEmails;
+            $this->types[self::EMAIL_STATS]['openFamilyEmailIds']  = ArrayParameterType::INTEGER;
+        }
+
+        if (!$dryRun) {
+            $archiveTable = $this->archiveTableName(self::EMAIL_LIST_XREF);
+            $source       = $this->dbPrefix.self::EMAIL_LIST_XREF;
+
+            $this->connection->executeQuery('CREATE TABLE IF NOT EXISTS '.$archiveTable.' SELECT * FROM '.$source.' LIMIT 0', [], []);
+
+            if ($this->columnsOf($archiveTable) !== $this->columnsOf($source)) {
+                throw new \RuntimeException('Cannot keep the removed segment links in '.$archiveTable.', because its columns no longer match '.$source.'. Rename or drop it, and the next run makes a new one.');
+            }
+        }
+
+        return count($keptEmails);
+    }
+
+    /**
+     * Follows the parent links from an email up to the email that stands for its whole family.
+     *
+     * @param array<int, int> $parents each email's parent in the family, or the email itself at the top
+     * @param int             $id      the email to look up
+     *
+     * @return int the email at the top of the family
+     */
+    private function findRoot(array $parents, int $id): int
+    {
+        while (isset($parents[$id]) && $parents[$id] !== $id) {
+            $id = $parents[$id];
+        }
+
+        return $id;
+    }
+
+    /**
+     * Widens a list of emails to every email in their variant and translation families.
+     *
+     * @param array<int, mixed> $emailIds the email IDs, where null stands for a deleted email
+     *
+     * @return list<int> the IDs of every family member, each once
+     */
+    private function familiesOf(array $emailIds): array
+    {
+        $members = [];
+
+        foreach ($emailIds as $emailId) {
+            if (null === $emailId) {
+                continue;
+            }
+
+            $emailId = (int) $emailId;
+
+            foreach ($this->familyMembers[$this->familyRoots[$emailId] ?? $emailId] ?? [$emailId] as $member) {
+                $members[$member] = true;
+            }
+        }
+
+        return array_keys($members);
+    }
+
+    /**
+     * Reads the segment links of these emails, one email ID per link.
+     *
+     * @param list<int> $emailIds the emails to read
+     * @param bool      $lock     true to lock the links until the transaction ends
+     *
+     * @return list<int> the email ID of each link
+     */
+    private function readSegmentLinks(array $emailIds, bool $lock): array
+    {
+        if ([] === $emailIds) {
+            return [];
+        }
+
+        return array_map(intval(...), $this->connection->executeQuery(
+            'SELECT email_id FROM '.$this->dbPrefix.self::EMAIL_LIST_XREF.' WHERE email_id IN (:emailIds)'.($lock ? ' FOR UPDATE' : ''),
+            ['emailIds' => $emailIds],
+            ['emailIds' => ArrayParameterType::INTEGER]
+        )->fetchFirstColumn());
+    }
+
+    /**
+     * Counts, on a dry run, the segment links the email_stats cleanup would remove, and the emails they belong to.
+     */
+    private function countSegmentLinks(): void
+    {
+        $emailIds = $this->connection->executeQuery(
+            'SELECT DISTINCT '.$this->dbPrefix.'email_stats.email_id FROM '.str_replace([self::SET, self::PREFIX], ['', $this->dbPrefix], $this->queriesTemplate[self::EMAIL_STATS]),
+            $this->params[self::EMAIL_STATS],
+            $this->types[self::EMAIL_STATS]
+        )->fetchFirstColumn();
+
+        $links               = $this->readSegmentLinks($this->familiesOf($emailIds), false);
+        $this->unlinkedLinks = count($links);
+
+        foreach ($links as $emailId) {
+            $this->unlinkedEmails[$emailId] = true;
+        }
+    }
+
+    /**
+     * Removes the segments of the emails whose email_stats this batch deletes, and of their variants and translations, in the batch's transaction.
+     * The links are locked and copied to the archive table first. If the copy or the delete counts differently from the links locked, the batch is rolled back.
+     *
+     * @param string                                    $emailsSql selects the email ID of each row the batch deletes
+     * @param array<string, int|list<int>|list<string>> $params    the batch's parameters
+     * @param array<string, int>                        $types     the batch's parameter types
+     */
+    private function unlinkSegmentsOf(string $emailsSql, array $params, array $types): void
+    {
+        $emailIds = $this->familiesOf($this->connection->executeQuery($emailsSql, $params, $types)->fetchFirstColumn());
+        $links    = $this->readSegmentLinks($emailIds, true);
+
+        if ([] === $links) {
+            return;
+        }
+
+        $source     = $this->dbPrefix.self::EMAIL_LIST_XREF;
+        $batch      = ['emailIds' => $emailIds];
+        $batchTypes = ['emailIds' => ArrayParameterType::INTEGER];
+        $copied     = $this->connection->executeQuery('INSERT INTO '.$this->archiveTableName(self::EMAIL_LIST_XREF).' SELECT * FROM '.$source.' WHERE email_id IN (:emailIds)', $batch, $batchTypes)->rowCount();
+        $removed    = $this->connection->executeQuery('DELETE FROM '.$source.' WHERE email_id IN (:emailIds)', $batch, $batchTypes)->rowCount();
+
+        if ($copied !== count($links) || $removed !== count($links)) {
+            throw new \RuntimeException('Segment check failed on '.$source.': '.$copied.' links copied, '.$removed.' removed, '.count($links).' expected. The batch was rolled back.');
+        }
+
+        $this->unlinkedLinks += $removed;
+
+        foreach ($links as $emailId) {
+            $this->unlinkedEmails[$emailId] = true;
+        }
+    }
+
+    /**
+     * Describes the segment links the email_stats cleanup removed, or would remove on a dry run, and the closed emails it kept for their family.
+     *
+     * @param bool $dryRun     true when the run only counted
+     * @param int  $keptEmails how many closed emails kept their email_stats because their family has an open email
+     *
+     * @return string the sentences to add to the run's message, each starting with a space
+     */
+    private function segmentMessage(bool $dryRun, int $keptEmails): string
+    {
+        $message = ' '.$this->unlinkedLinks.' segment links of '.count($this->unlinkedEmails).' emails '.($dryRun ? 'would be removed.' : 'were removed first and kept in '.$this->archiveTableName(self::EMAIL_LIST_XREF).'.');
+
+        if ($keptEmails > 0) {
+            $message .= ' '.$keptEmails.' closed emails keep their email_stats, because a variant or translation of each is still open.';
+        }
+
+        return $message;
     }
 
     /**

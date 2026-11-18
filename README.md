@@ -1,6 +1,6 @@
 # Housekeeping by Leuchtfeuer
 
-This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--max-rows`, `--archive`, `--lead-object`, `--ip-addresses`, `--ip-slice` and the `housekeeping_skip_email_stats_tokens` setting.
+This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--max-rows`, `--archive`, `--lead-object`, `--ip-addresses`, `--ip-slice`, `--unlink-segments` and the `housekeeping_skip_email_stats_tokens` setting.
 
 ## Overview / Purpose / Features
 This plugin provides a Mautic Housekeeping Command for database cleanup purposes.
@@ -49,6 +49,7 @@ By default, entries older than 365 days are deleted from the CampaignLeadEventLo
     | --lead-object             | Only these objects from lead_event_log will be deleted, the rest are kept. Accepts comma-separated list (e.g., segment,import). Implies --lead.
 -p  | --page-hits               | Only entries from the page_hits table will be deleted.
     | --exclude-emails          | Exclude specific email IDs from event log cleanup. Accepts comma-separated list of email IDs (e.g., 1,44,61). Works with --email-stats, --email-stats-tokens and --page-hits.
+    | --unlink-segments         | With --email-stats, remove the segments of each email whose rows are deleted, so it cannot be sent again to the same contacts. Needs --batch-size. Off by default.
     | --ip-addresses            | Delete the rows of ip_addresses that no other table uses. Needs --batch-size. Not part of the default cleanup.
     | --ip-slice                | With --ip-addresses, check only slice N of M of the IDs, for example 5/31. Off by default.
 ```
@@ -81,6 +82,18 @@ echo "********** $i **********" >> $OUT
 $TIME -ao $OUT sudo -u www-data php $DOCROOT/bin/console leu:hou $OP -d $i 2>&1 >>$OUT
 sleep 2
 done
+```
+
+### Segment emails and `--email-stats`
+A segment email goes to the contacts in its segments who have no `email_stats` row for it. `--email-stats` deletes these rows for closed emails: emails that are unpublished, or whose end date passed more than `--days-old` days ago. If such an email is published again, it goes again to the same contacts.
+
+`--unlink-segments` stops that. Each batch removes the segments of the emails whose rows it deletes, in the same transaction, before it deletes the rows. An email with no segments sends to nobody. To send it again, someone has to add segments to it in the email form.
+- Variants and translations count as one email, because Mautic does not send an email to contacts who already got one of its variants or translations. When the rows of one of them go, all of them lose their segments. The rows of a closed email are kept while one of its variants or translations is still open.
+- Only emails that lose rows in the run lose their segments. An email unpublished last week to pause a send keeps them.
+- The removed links are copied first to `housekeeping_archive_email_list_xref`, with or without `--archive`. To put them back, copy the rows from there into `email_list_xref`.
+- It needs `--batch-size`. A dry run counts the links it would remove.
+```
+bin/console leuchtfeuer:housekeeping --email-stats --unlink-segments --days-old=365 --batch-size=5000
 ```
 
 ### Unused IP addresses

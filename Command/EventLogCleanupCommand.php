@@ -44,10 +44,11 @@ class EventLogCleanupCommand extends Command
                     new InputOption('lead', 'l', InputOption::VALUE_NONE, 'Purge only Lead Event Log Records'),
                     new InputOption('lead-object', null, InputOption::VALUE_REQUIRED, 'Comma-separated list of lead_event_log objects to purge (e.g., segment,import). All other objects are kept. Implies --lead.'),
                     new InputOption('page-hits', 'p', InputOption::VALUE_NONE, 'Purge only Hit (page_hit) Records'),
-                    new InputOption('email-stats', 'm', InputOption::VALUE_NONE, 'Purge only Email Stats Records where the referenced email entry is currently not published and purge Email Stats Devices. Important: If referenced email is ever switched back to published, the contacts will get the email again.'),
+                    new InputOption('email-stats', 'm', InputOption::VALUE_NONE, 'Purge only Email Stats Records where the referenced email entry is currently not published and purge Email Stats Devices. Important: If referenced email is ever switched back to published, the contacts will get the email again. Add --unlink-segments to stop that.'),
                     new InputOption('email-stats-tokens', 't', InputOption::VALUE_NONE, 'Set only tokens fields in Email Stats Records to NULL. Important: This option can not be combined with any "-c", "-l" or "-m" flag in one command. And: If the option flag "-t" is not set, the NULL setting of tokens will not be done with the basis command, so if you just run mautic:leuchtfeuer:housekeeping without a flag)'),
                     new InputOption('cmp-id', 'i', InputOption::VALUE_OPTIONAL, 'Delete only campaign_lead_eventLog for a specific CampaignID. Implies --campaign-lead.', 'none'),
                     new InputOption('exclude-emails', null, InputOption::VALUE_REQUIRED, 'Comma-separated list of email IDs to exclude from deletion (e.g., 1,44,61). Works with --email-stats, --email-stats-tokens and --page-hits.'),
+                    new InputOption('unlink-segments', null, InputOption::VALUE_NONE, 'With --email-stats, remove the segments of each email whose email_stats rows are deleted, and of its variants and translations, in the same transaction, so publishing it again cannot send it a second time to the same contacts. The removed links are kept in a '.EventLogCleanup::ARCHIVE_PREFIX.EventLogCleanup::EMAIL_LIST_XREF.' table. The email_stats of a closed email are kept while one of its variants or translations is still open. Needs --batch-size.'),
                     new InputOption('ip-addresses', null, InputOption::VALUE_NONE, 'Delete the ip_addresses rows that no table uses. A row counts as used when a table with a foreign key to ip_addresses or a '.EventLogCleanup::ARCHIVE_PREFIX.'<table> table points at it. Any other table with the same column stops the run. The newest '.EventLogCleanup::IP_KEEP_NEWEST.' IDs are never touched. Needs --batch-size. Not part of the default cleanup. --days-old has no effect on it.'),
                     new InputOption('ip-slice', null, InputOption::VALUE_REQUIRED, 'With --ip-addresses, check only slice N of M, for example 5/31. The IDs are cut into blocks of '.EventLogCleanup::IP_SLICE_BLOCK.', and slice N takes block N and every Mth block after it. Off by default, so every ID is checked.'),
                     new InputOption('optimize-tables', 'o', InputOption::VALUE_NONE, 'Optimize all database tables. If no cleanup flag is set, only the optimization runs and no data is deleted.'),
@@ -98,6 +99,9 @@ class EventLogCleanupCommand extends Command
                 Purge only email_stats where the referenced email entry is currently not published and email_stats_devices records [Important: If referenced email is ever switched back to published, the contacts will get the email again]:
                 <info>php %command.full_name% --email-stats</info>
 
+                Purge email_stats and remove the segments of the emails that lose them, so they cannot be sent again to the same contacts:
+                <info>php %command.full_name% --email-stats --unlink-segments --batch-size=5000</info>
+
                 Set tokens field in email_stats to NULL:
                 <info>php %command.full_name% --email-stats-tokens</info>
 
@@ -124,15 +128,22 @@ class EventLogCleanupCommand extends Command
             return Command::FAILURE;
         }
 
-        $archive     = (bool) $input->getOption('archive');
-        $ipAddresses = (bool) $input->getOption('ip-addresses');
+        $archive        = (bool) $input->getOption('archive');
+        $ipAddresses    = (bool) $input->getOption('ip-addresses');
+        $unlinkSegments = (bool) $input->getOption('unlink-segments');
 
-        foreach (['max-rows' => null !== $maxRows, 'archive' => $archive, 'ip-addresses' => $ipAddresses] as $option => $given) {
+        foreach (['max-rows' => null !== $maxRows, 'archive' => $archive, 'ip-addresses' => $ipAddresses, 'unlink-segments' => $unlinkSegments] as $option => $given) {
             if ($given && null === $batchSize) {
                 $output->writeln('<error>--'.$option.' needs --batch-size.</error>');
 
                 return Command::FAILURE;
             }
+        }
+
+        if ($unlinkSegments && !$input->getOption('email-stats')) {
+            $output->writeln('<error>--unlink-segments needs --email-stats.</error>');
+
+            return Command::FAILURE;
         }
 
         $ipSlice = $this->parseIpSlice($input);
@@ -196,6 +207,8 @@ class EventLogCleanupCommand extends Command
             [$slice, $slices] = $ipSlice ?? [1, 1];
             $this->eventLogCleanup->setIpSlice($slice, $slices);
         }
+
+        $this->eventLogCleanup->setUnlinkSegments($unlinkSegments);
 
         if (array_sum($operations) > 0) {
             try {
