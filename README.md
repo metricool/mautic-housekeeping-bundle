@@ -38,7 +38,7 @@ By default, entries older than 365 days are deleted from the CampaignLeadEventLo
 -d  | --days-old                | Specifies the minimum age of the entries to be deleted. Default: 365 days
 -r  | --dry-run                 | Execute as dry run. No entries will be deleted
     | --batch-size              | Process this many rows at a time, each batch committed on its own, instead of one large transaction. Off by default.
-    | --max-rows                | Stop the run once it has deleted or changed this many rows in all. Needs --batch-size. Rows removed through a foreign key cascade are not counted. Off by default.
+    | --max-rows                | Stop the run once it has deleted or changed this many rows in all. Needs --batch-size. Rows removed through a foreign key cascade are not counted, and neither are the segment links that --unlink-segments removes. Off by default.
     | --archive                 | Copy every row the run deletes or changes, and the rows a foreign key cascade removes with them, to a housekeeping_archive_<table> table in the same transaction. Needs --batch-size. Off by default.
 -0  | --optimize-tables         | Runs OPTIMIZE TABLE on all Mautic tables. 
 -i  | --cmp-id                  | Delete only data for a specific campaign ID from campaign_lead_event_log
@@ -88,9 +88,11 @@ done
 A segment email goes to the contacts in its segments who have no `email_stats` row for it. `--email-stats` deletes these rows for closed emails: emails that are unpublished, or whose end date passed more than `--days-old` days ago. If such an email is published again, it goes again to the same contacts.
 
 `--unlink-segments` stops that. Each batch removes the segments of the emails whose rows it deletes, in the same transaction, before it deletes the rows. An email with no segments sends to nobody. To send it again, someone has to add segments to it in the email form.
-- Variants and translations count as one email, because Mautic does not send an email to contacts who already got one of its variants or translations. When the rows of one of them go, all of them lose their segments. The rows of a closed email are kept while one of its variants or translations is still open.
-- Only emails that lose rows in the run lose their segments. An email unpublished last week to pause a send keeps them.
+- Variants and translations count as one email, because Mautic does not send an email to contacts who already got one of its variants or translations. When the rows of one of them go, all of them lose their segments. The rows of a closed email are kept while one of its variants or translations is still open, or is in `--exclude-emails`.
+- Each batch checks and locks these related emails before it writes, so an email published during the run keeps its segments.
+- Only emails that lose rows in the run lose their segments. An email unpublished to pause a send counts as closed too, so it loses its segments if it has rows older than `--days-old`.
 - The removed links are copied first to `housekeeping_archive_email_list_xref`, with or without `--archive`. To put them back, copy the rows from there into `email_list_xref`.
+- The removed links do not count towards `--max-rows`. Each email loses its links only when the run deletes rows of it, so the limit bounds them too.
 - It needs `--batch-size`. A dry run counts the links it would remove.
 ```
 bin/console leuchtfeuer:housekeeping --email-stats --unlink-segments --days-old=365 --batch-size=5000

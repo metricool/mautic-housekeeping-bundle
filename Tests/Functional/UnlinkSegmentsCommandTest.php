@@ -24,11 +24,9 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
         $this->dropArchiveTable();
     }
 
-    protected function tearDown(): void
+    protected function beforeTearDown(): void
     {
         $this->dropArchiveTable();
-
-        parent::tearDown();
     }
 
     public function testRemovesTheSegmentsOfAnEmailWhoseStatsAreDeleted(): void
@@ -113,8 +111,78 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
 
         $output = $commandTester->getDisplay();
         $this->assertStringContainsString('0 email_stats rows have been deleted.', $output);
-        $this->assertStringContainsString('1 closed emails keep their email_stats, because a variant or translation of each is still open.', $output);
+        $this->assertStringContainsString('1 closed emails keep their email_stats, because a variant or translation of each is still open or excluded.', $output);
         $this->assertSame(0, $commandTester->getStatusCode());
+    }
+
+    public function testKeepsTheWholeFamilyWhenOneOfItsEmailsIsExcluded(): void
+    {
+        $this->fixtureHelper->enablePlugin();
+
+        $contact     = $this->fixtureHelper->createContact('unlink-excluded@test.com');
+        $segment     = $this->fixtureHelper->createSegment('unlink-excluded');
+        $parent      = $this->fixtureHelper->createSegmentEmail('Unlink Excluded Parent', false, [$segment]);
+        $translation = $this->fixtureHelper->createSegmentEmail('Unlink Excluded Translation', false, [$segment], null, $parent);
+        $parentStat  = $this->fixtureHelper->createEmailStat($contact, $parent, $this->fixtureHelper->daysAgo(400));
+        $stat        = $this->fixtureHelper->createEmailStat($contact, $translation, $this->fixtureHelper->daysAgo(400));
+
+        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            '--days-old'        => 30,
+            '--email-stats'     => true,
+            '--unlink-segments' => true,
+            '--exclude-emails'  => (string) $parent->getId(),
+            '--batch-size'      => 1,
+        ]);
+
+        $this->em->clear();
+
+        $this->assertNotNull($this->em->getRepository(EmailStat::class)->find($parentStat->getId()));
+        $this->assertNotNull($this->em->getRepository(EmailStat::class)->find($stat->getId()));
+        $this->assertSame([(int) $segment->getId()], $this->segmentIdsOf($parent));
+        $this->assertSame([(int) $segment->getId()], $this->segmentIdsOf($translation));
+
+        $output = $commandTester->getDisplay();
+        $this->assertStringContainsString('0 email_stats rows have been deleted.', $output);
+        $this->assertStringContainsString('0 segment links of 0 emails were removed first', $output);
+        $this->assertSame(0, $commandTester->getStatusCode());
+    }
+
+    public function testARunDoesNotKeepTheConditionsOfAnEarlierRun(): void
+    {
+        $this->fixtureHelper->enablePlugin();
+
+        $contact = $this->fixtureHelper->createContact('unlink-rerun@test.com');
+        $segment = $this->fixtureHelper->createSegment('unlink-rerun');
+        $parent  = $this->fixtureHelper->createSegmentEmail('Unlink Rerun Parent', true, [$segment]);
+        $variant = $this->fixtureHelper->createSegmentEmail('Unlink Rerun Variant', false, [$segment], $parent);
+        $stat    = $this->fixtureHelper->createEmailStat($contact, $variant, $this->fixtureHelper->daysAgo(400));
+
+        $firstRun = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            '--days-old'        => 30,
+            '--email-stats'     => true,
+            '--unlink-segments' => true,
+            '--batch-size'      => 1,
+            '--dry-run'         => true,
+        ]);
+
+        $this->assertStringContainsString('1 closed emails keep their email_stats', $firstRun->getDisplay());
+
+        $this->em->getConnection()->update(MAUTIC_TABLE_PREFIX.'emails', ['is_published' => 0], ['id' => (int) $parent->getId()]);
+
+        $secondRun = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            '--days-old'        => 30,
+            '--email-stats'     => true,
+            '--unlink-segments' => true,
+            '--batch-size'      => 1,
+        ]);
+
+        $this->em->clear();
+
+        $this->assertNull($this->em->getRepository(EmailStat::class)->find($stat->getId()));
+        $this->assertSame([], $this->segmentIdsOf($parent));
+        $this->assertSame([], $this->segmentIdsOf($variant));
+        $this->assertStringContainsString('2 segment links of 2 emails were removed first', $secondRun->getDisplay());
+        $this->assertSame(0, $secondRun->getStatusCode());
     }
 
     public function testRemovesTheSegmentsOfEveryEmailInAClosedFamily(): void
