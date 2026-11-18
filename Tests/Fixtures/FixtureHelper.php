@@ -137,19 +137,20 @@ final class FixtureHelper
     }
 
     /**
-     * Saves a segment with no filters.
+     * Saves a segment with these filters.
      *
-     * @param string $alias the segment's name and alias
+     * @param string                     $alias   the segment's name and alias
+     * @param list<array<string, mixed>> $filters the segment's filters, none by default
      *
      * @return LeadList the saved segment
      */
-    public function createSegment(string $alias): LeadList
+    public function createSegment(string $alias, array $filters = []): LeadList
     {
         $segment = new LeadList();
         $segment->setName($alias);
         $segment->setPublicName($alias);
         $segment->setAlias($alias);
-        $segment->setFilters([]);
+        $segment->setFilters($filters);
         $this->em->persist($segment);
         $this->em->flush();
 
