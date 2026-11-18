@@ -1,6 +1,6 @@
 # Housekeeping by Leuchtfeuer
 
-This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--max-rows`, `--archive`, `--lead-object`, `--ip-addresses`, `--ip-slice`, `--unlink-segments` and the `housekeeping_skip_email_stats_tokens` setting.
+This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--max-rows`, `--archive`, `--lead-object`, `--ip-addresses`, `--ip-slice`, `--unlink-segments`, `--exclude-segment-emails` and the `housekeeping_skip_email_stats_tokens` setting.
 
 ## Overview / Purpose / Features
 This plugin provides a Mautic Housekeeping Command for database cleanup purposes.
@@ -49,6 +49,7 @@ By default, entries older than 365 days are deleted from the CampaignLeadEventLo
     | --lead-object             | Only these objects from lead_event_log will be deleted, the rest are kept. Accepts comma-separated list (e.g., segment,import). Implies --lead.
 -p  | --page-hits               | Only entries from the page_hits table will be deleted.
     | --exclude-emails          | Exclude specific email IDs from event log cleanup. Accepts comma-separated list of email IDs (e.g., 1,44,61). Works with --email-stats, --email-stats-tokens and --page-hits.
+    | --exclude-segment-emails  | Also exclude every email that a segment filter names, read from all segments when the run starts. Add more filter fields whose values are email IDs, comma-separated (e.g., --exclude-segment-emails=plugin_email_clicked). Works with --email-stats, --email-stats-tokens and --page-hits. Off by default.
     | --unlink-segments         | With --email-stats, remove the segments of each email whose rows are deleted, so it cannot be sent again to the same contacts. Needs --batch-size. Off by default.
     | --ip-addresses            | Delete the rows of ip_addresses that no other table uses. Needs --batch-size. Not part of the default cleanup.
     | --ip-slice                | With --ip-addresses, check only slice N of M of the IDs, for example 5/31. Off by default.
@@ -96,6 +97,18 @@ A segment email goes to the contacts in its segments who have no `email_stats` r
 - It needs `--batch-size`. A dry run counts the links it would remove.
 ```
 bin/console leuchtfeuer:housekeeping --email-stats --unlink-segments --days-old=365 --batch-size=5000
+```
+
+### Emails named in segment filters
+A segment can filter on one email, with "Read a specific email" or "Was sent a specific email". Its members come from the `email_stats` rows of that email, so deleting those rows changes who is in the segment. `--exclude-segment-emails` keeps them.
+- When the run starts, before it deletes anything, it reads the filters of every segment, published or not. Every email they name is excluded, as if it were in `--exclude-emails`. It adds to `--exclude-emails` and works with the same options: `--email-stats`, `--email-stats-tokens` and `--page-hits`.
+- It reads the `lead_email_received` and `lead_email_sent` filters, with any operator. A plugin can add a filter whose values are email IDs too, for example one on clicks in `page_hits`. Add its field name to the option, comma-separated: `--exclude-segment-emails=plugin_email_clicked`.
+- If the filters of a segment cannot be read, or one of these filters holds a value that is not an email ID, the run stops with an error before it deletes anything.
+- Filters such as "Read any email (date)", "Read any email X number of times" or "Clicked any link from any email" read the same rows without naming an email. No email ID can keep these segments as they are, so the output lists them in a warning.
+- The filters are read once per run. A filter added during a run counts from the next run.
+- With `--unlink-segments`, a named email keeps its rows and segments, and so do its variants and translations.
+```
+bin/console leuchtfeuer:housekeeping --email-stats --page-hits --exclude-segment-emails --days-old=365 --batch-size=5000
 ```
 
 ### Unused IP addresses

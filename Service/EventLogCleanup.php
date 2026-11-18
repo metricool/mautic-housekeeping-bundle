@@ -30,8 +30,14 @@ class EventLogCleanup
     public const PAGE_HITS            = 'page_hits';
     public const ARCHIVE_PREFIX       = 'housekeeping_archive_';
     public const EMAIL_LIST_XREF      = 'email_list_xref';
+    public const SEGMENT_EMAIL_FIELDS = ['lead_email_received', 'lead_email_sent'];
     private const ID_RANGE_TYPES      = ['fromId' => \PDO::PARAM_INT, 'toId' => \PDO::PARAM_INT];
     private const MAX_ID_SPAN         = 50000;
+
+    /**
+     * The core segment filters that read email_stats rows or email clicks without naming an email, such as a date or a count.
+     */
+    private const SEGMENT_EMAIL_ACTIVITY_FIELDS = ['email_clicked_link_date', 'email_id', 'lead_email_read_count', 'lead_email_read_date', 'lead_email_sent_date'];
 
     public const IP_ADDRESSES          = 'ip_addresses';
     public const IP_KEEP_NEWEST        = 1000000;
@@ -219,6 +225,61 @@ class EventLogCleanup
     public function setUnlinkSegments(bool $unlinkSegments): void
     {
         $this->unlinkSegments = $unlinkSegments;
+    }
+
+    /**
+     * Reads the filters of every segment, published or not, and collects the email IDs that the filters on these fields name.
+     * It also lists the segments with a filter on email activity that names no email, such as a date or a count, because no email ID can keep them as they are.
+     * It rejects a segment whose filters cannot be read, and a value of these fields that is not an email ID.
+     *
+     * @param list<string> $fields the filter fields whose values are email IDs
+     *
+     * @return array{emails: list<int>, segments: list<int>} the email IDs, and the segments that no email ID can keep, both in ascending order
+     */
+    public function findSegmentEmails(array $fields): array
+    {
+        $emails   = [];
+        $segments = [];
+        $rows     = $this->connection->executeQuery('SELECT id, filters FROM '.$this->dbPrefix.'lead_lists ORDER BY id', [], [])->fetchAllAssociative();
+
+        foreach ($rows as $row) {
+            $segmentId = (int) $row['id'];
+
+            foreach ($this->filtersOf($segmentId, $row['filters']) as $filter) {
+                $field = is_array($filter) ? ($filter['field'] ?? null) : null;
+
+                if (!is_array($filter) || !is_string($field)) {
+                    continue;
+                }
+
+                if (!in_array($field, $fields, true)) {
+                    if (in_array($field, self::SEGMENT_EMAIL_ACTIVITY_FIELDS, true)) {
+                        $segments[$segmentId] = true;
+                    }
+
+                    continue;
+                }
+
+                $ids = $this->emailIdsOf($filter);
+
+                if (null === $ids) {
+                    throw new \UnexpectedValueException('Segment '.$segmentId.' has a value in its '.$field.' filter that is not an email ID.');
+                }
+
+                if ([] === $ids) {
+                    $segments[$segmentId] = true;
+                }
+
+                foreach ($ids as $id) {
+                    $emails[$id] = true;
+                }
+            }
+        }
+
+        $emails = array_keys($emails);
+        sort($emails);
+
+        return ['emails' => $emails, 'segments' => array_keys($segments)];
     }
 
     /**
@@ -1004,6 +1065,71 @@ class EventLogCleanup
         }
 
         return $message;
+    }
+
+    /**
+     * Unserializes the filters of a segment, which Mautic stores as a serialized PHP array.
+     *
+     * @param int   $segmentId the segment the filters belong to
+     * @param mixed $raw       the stored value of its filters column
+     *
+     * @return array<mixed> the filters, or none when the column holds null
+     */
+    private function filtersOf(int $segmentId, mixed $raw): array
+    {
+        if (null === $raw || 'N;' === $raw) {
+            return [];
+        }
+
+        $filters = false;
+
+        if (is_string($raw)) {
+            set_error_handler(static fn (): bool => true);
+
+            try {
+                $filters = unserialize($raw, ['allowed_classes' => false]);
+            } finally {
+                restore_error_handler();
+            }
+        }
+
+        if (!is_array($filters)) {
+            throw new \UnexpectedValueException('The filters of segment '.$segmentId.' cannot be read.');
+        }
+
+        return $filters;
+    }
+
+    /**
+     * Reads the email IDs that a filter names, from its properties and from the older filter key.
+     *
+     * @param array<mixed> $filter one filter of a segment
+     *
+     * @return list<int>|null the IDs, or null when a value is not an email ID
+     */
+    private function emailIdsOf(array $filter): ?array
+    {
+        $ids = [];
+
+        foreach ([$filter['properties']['filter'] ?? null, $filter['filter'] ?? null] as $value) {
+            foreach (is_array($value) ? $value : [$value] as $item) {
+                if (null === $item || '' === $item) {
+                    continue;
+                }
+
+                if (is_string($item) && ctype_digit($item)) {
+                    $item = (int) $item;
+                }
+
+                if (!is_int($item) || $item < 1) {
+                    return null;
+                }
+
+                $ids[] = $item;
+            }
+        }
+
+        return $ids;
     }
 
     /**

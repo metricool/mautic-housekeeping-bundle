@@ -48,6 +48,7 @@ class EventLogCleanupCommand extends Command
                     new InputOption('email-stats-tokens', 't', InputOption::VALUE_NONE, 'Set only tokens fields in Email Stats Records to NULL. Important: This option can not be combined with any "-c", "-l" or "-m" flag in one command. And: If the option flag "-t" is not set, the NULL setting of tokens will not be done with the basis command, so if you just run mautic:leuchtfeuer:housekeeping without a flag)'),
                     new InputOption('cmp-id', 'i', InputOption::VALUE_OPTIONAL, 'Delete only campaign_lead_eventLog for a specific CampaignID. Implies --campaign-lead.', 'none'),
                     new InputOption('exclude-emails', null, InputOption::VALUE_REQUIRED, 'Comma-separated list of email IDs to exclude from deletion (e.g., 1,44,61). Works with --email-stats, --email-stats-tokens and --page-hits.'),
+                    new InputOption('exclude-segment-emails', null, InputOption::VALUE_OPTIONAL, 'Also exclude every email that a segment filter names, so deleting its rows cannot change who is in the segment. The filters of every segment, published or not, are read once when the run starts. Reads the '.implode(' and ', EventLogCleanup::SEGMENT_EMAIL_FIELDS).' filters, and also the filter fields you list, comma-separated, whose values are email IDs, such as one a plugin adds. If a filter cannot be read, the run stops before it deletes anything. Works with --email-stats, --email-stats-tokens and --page-hits.', false),
                     new InputOption('unlink-segments', null, InputOption::VALUE_NONE, 'With --email-stats, remove the segments of each email whose email_stats rows are deleted, and of its variants and translations, in the same transaction, so publishing it again cannot send it a second time to the same contacts. The removed links are kept in a '.EventLogCleanup::ARCHIVE_PREFIX.EventLogCleanup::EMAIL_LIST_XREF.' table. The email_stats of a closed email are kept while one of its variants or translations is still open or in --exclude-emails. Needs --batch-size.'),
                     new InputOption('ip-addresses', null, InputOption::VALUE_NONE, 'Delete the ip_addresses rows that no table uses. A row counts as used when a table with a foreign key to ip_addresses or a '.EventLogCleanup::ARCHIVE_PREFIX.'<table> table points at it. Any other table with the same column stops the run. The newest '.EventLogCleanup::IP_KEEP_NEWEST.' IDs are never touched. Needs --batch-size. Not part of the default cleanup. --days-old has no effect on it.'),
                     new InputOption('ip-slice', null, InputOption::VALUE_REQUIRED, 'With --ip-addresses, check only slice N of M, for example 5/31. The IDs are cut into blocks of '.EventLogCleanup::IP_SLICE_BLOCK.', and slice N takes block N and every Mth block after it. Off by default, so every ID is checked.'),
@@ -113,6 +114,9 @@ class EventLogCleanupCommand extends Command
 
                 Keep the page_hits records of specific emails, such as clicks that a segment still reads:
                 <info>php %command.full_name% --page-hits --exclude-emails=1,44,61</info>
+
+                Keep the records of every email that a segment filter names, including the filter field a plugin adds:
+                <info>php %command.full_name% --email-stats --page-hits --exclude-segment-emails=plugin_email_clicked</info>
                 EOT
             );
     }
@@ -160,6 +164,14 @@ class EventLogCleanupCommand extends Command
             return Command::FAILURE;
         }
 
+        $segmentEmailFields = $this->parseSegmentEmailFields($input);
+
+        if (false === $segmentEmailFields) {
+            $output->writeln('<error>--exclude-segment-emails takes filter field names made of letters, digits and underscores, separated by commas.</error>');
+
+            return Command::FAILURE;
+        }
+
         $daysOld                              = (int) $input->getOption('days-old');
         $dryRun                               = $input->getOption('dry-run');
         $campaignId                           = 'none' === $input->getOption('cmp-id') ? null : (int) $input->getOption('cmp-id');
@@ -197,6 +209,31 @@ class EventLogCleanupCommand extends Command
             $output->writeln('<error>The combination of "-t" flag with either "-m" flag or "-c" flag or "-l" flag is not supported/possible. You can only combine the "-t" flag with "-d" flag and/or "-r" flag.</error>');
 
             return Command::FAILURE;
+        }
+
+        if (null !== $segmentEmailFields) {
+            if (!$operations[EventLogCleanup::EMAIL_STATS] && !$operations[EventLogCleanup::EMAIL_STATS_TOKENS] && !$operations[EventLogCleanup::PAGE_HITS]) {
+                $output->writeln('<error>--exclude-segment-emails needs --email-stats, --email-stats-tokens or --page-hits.</error>');
+
+                return Command::FAILURE;
+            }
+
+            try {
+                $segmentEmails = $this->eventLogCleanup->findSegmentEmails($segmentEmailFields);
+            } catch (\Throwable $e) {
+                $output->writeln(sprintf('<error>Nothing was deleted, because the segment filters could not be read: %s</error>', $e->getMessage()));
+
+                return Command::FAILURE;
+            }
+
+            $excludeEmails = array_values(array_unique([...($excludeEmails ?? []), ...$segmentEmails['emails']]));
+            $excludeEmails = [] === $excludeEmails ? null : $excludeEmails;
+
+            $output->writeln('<info>Segment filters name '.count($segmentEmails['emails']).' emails, which the run excludes too'.([] === $segmentEmails['emails'] ? '' : ': '.implode(', ', $segmentEmails['emails'])).'.</info>');
+
+            if ([] !== $segmentEmails['segments']) {
+                $output->writeln('<comment>Warning: segments '.implode(', ', $segmentEmails['segments']).' filter on email activity without naming an email, such as a date or a count, so deleting old rows can still change who is in them.</comment>');
+            }
         }
 
         if (null !== $leadObjects) {
@@ -280,6 +317,38 @@ class EventLogCleanupCommand extends Command
         }
 
         return array_values($ids);
+    }
+
+    /**
+     * Reads the filter fields of --exclude-segment-emails, the core fields first.
+     *
+     * @param InputInterface $input the command input
+     *
+     * @return list<string>|false|null the fields to read, null when the option is not given, false when a name is not made of letters, digits and underscores
+     */
+    private function parseSegmentEmailFields(InputInterface $input): array|false|null
+    {
+        $rawValue = $input->getOption('exclude-segment-emails');
+
+        if (false === $rawValue) {
+            return null;
+        }
+
+        $fields = EventLogCleanup::SEGMENT_EMAIL_FIELDS;
+
+        if (is_string($rawValue) && '' !== trim($rawValue)) {
+            foreach (explode(',', $rawValue) as $field) {
+                $field = trim($field);
+
+                if (1 !== preg_match('/\A[A-Za-z0-9_]+\z/', $field)) {
+                    return false;
+                }
+
+                $fields[] = $field;
+            }
+        }
+
+        return array_values(array_unique($fields));
     }
 
     /**
