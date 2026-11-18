@@ -91,6 +91,32 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
         $this->assertSame(0, $commandTester->getStatusCode());
     }
 
+    public function testReadsIdsSeparatedByABar(): void
+    {
+        $this->fixtureHelper->enablePlugin();
+
+        $contact    = $this->fixtureHelper->createContact('segment-bar@test.com');
+        $first      = $this->fixtureHelper->createEmail('Segment Bar First Email', false);
+        $second     = $this->fixtureHelper->createEmail('Segment Bar Second Email', false);
+        $firstStat  = $this->fixtureHelper->createEmailStat($contact, $first, $this->fixtureHelper->daysAgo(400));
+        $secondStat = $this->fixtureHelper->createEmailStat($contact, $second, $this->fixtureHelper->daysAgo(400));
+
+        $this->fixtureHelper->createSegment('segment-bar', [$this->filter('lead_email_sent', $first->getId().'|'.$second->getId())]);
+
+        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            '--days-old'               => 30,
+            '--email-stats'            => true,
+            '--exclude-segment-emails' => null,
+        ]);
+
+        $this->em->clear();
+
+        $this->assertNotNull($this->em->getRepository(EmailStat::class)->find($firstStat->getId()));
+        $this->assertNotNull($this->em->getRepository(EmailStat::class)->find($secondStat->getId()));
+        $this->assertStringContainsString('Segment filters name 2 emails, which the run excludes too: '.$first->getId().', '.$second->getId().'.', $commandTester->getDisplay());
+        $this->assertSame(0, $commandTester->getStatusCode());
+    }
+
     public function testReadsOnlyTheFieldsItIsGiven(): void
     {
         $this->fixtureHelper->enablePlugin();
@@ -286,6 +312,28 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
 
         $this->assertNotNull($this->em->getRepository(EmailStat::class)->find($stat->getId()));
         $this->assertStringContainsString('Nothing was deleted, because the segment filters could not be read: Segment '.$segment->getId().' has a value in its lead_email_received filter that is not an email ID.', $commandTester->getDisplay());
+        $this->assertSame(1, $commandTester->getStatusCode());
+    }
+
+    public function testStopsBeforeAnyWriteWhenAFilterFieldIsEmpty(): void
+    {
+        $this->fixtureHelper->enablePlugin();
+
+        $contact = $this->fixtureHelper->createContact('segment-empty-field@test.com');
+        $email   = $this->fixtureHelper->createEmail('Segment Empty Field Email', false);
+        $stat    = $this->fixtureHelper->createEmailStat($contact, $email, $this->fixtureHelper->daysAgo(400));
+        $segment = $this->fixtureHelper->createSegment('segment-empty-field', [$this->filter(' ', [(string) $email->getId()])]);
+
+        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            '--days-old'               => 30,
+            '--email-stats'            => true,
+            '--exclude-segment-emails' => null,
+        ]);
+
+        $this->em->clear();
+
+        $this->assertNotNull($this->em->getRepository(EmailStat::class)->find($stat->getId()));
+        $this->assertStringContainsString('Nothing was deleted, because the segment filters could not be read: Segment '.$segment->getId().' has a filter that cannot be read.', $commandTester->getDisplay());
         $this->assertSame(1, $commandTester->getStatusCode());
     }
 

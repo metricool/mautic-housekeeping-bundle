@@ -45,6 +45,11 @@ class EventLogCleanup
     private const SEGMENT_VALUELESS_OPERATORS = ['empty', '!empty'];
 
     /**
+     * The segment filter operators whose text value Mautic splits on | into a list.
+     */
+    private const SEGMENT_LIST_OPERATORS = ['in', '!in'];
+
+    /**
      * The segment filter operator that holds a list of filters in its properties.
      */
     private const SEGMENT_CUSTOM_OPERATOR = 'custom_operator';
@@ -1115,7 +1120,7 @@ class EventLogCleanup
 
     /**
      * Lists the filters of a segment one by one, with the filters that a custom operator filter holds in its properties in its place.
-     * Rejects a filter that is not an array or has no field name, because what it reads cannot be known.
+     * Rejects a filter that is not an array or has no field name, or an empty one, because what it reads cannot be known.
      *
      * @param int          $segmentId the segment the filters belong to
      * @param array<mixed> $filters   the filters as stored
@@ -1133,7 +1138,7 @@ class EventLogCleanup
                 continue;
             }
 
-            if (!is_array($filter) || !isset($filter['field']) || !is_string($filter['field'])) {
+            if (!is_array($filter) || !isset($filter['field']) || !is_string($filter['field']) || '' === trim($filter['field'])) {
                 throw new \UnexpectedValueException('Segment '.$segmentId.' has a filter that cannot be read.');
             }
 
@@ -1145,6 +1150,7 @@ class EventLogCleanup
 
     /**
      * Reads the email IDs that a filter names, from its properties and from the older filter key.
+     * With the in and not in operators, a text value holds IDs separated by |, the way Mautic reads it.
      *
      * @param array<mixed> $filter one filter of a segment
      *
@@ -1152,9 +1158,14 @@ class EventLogCleanup
      */
     private function emailIdsOf(array $filter): ?array
     {
-        $ids = [];
+        $ids   = [];
+        $split = in_array($filter['operator'] ?? null, self::SEGMENT_LIST_OPERATORS, true);
 
         foreach ([$filter['properties']['filter'] ?? null, $filter['filter'] ?? null] as $value) {
+            if ($split && is_string($value)) {
+                $value = explode('|', $value);
+            }
+
             foreach (is_array($value) ? $value : [$value] as $item) {
                 if (null === $item || '' === $item) {
                     continue;
