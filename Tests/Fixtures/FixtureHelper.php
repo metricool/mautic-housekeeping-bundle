@@ -7,6 +7,7 @@ namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Fixtures;
 use Doctrine\ORM\EntityManagerInterface;
 use Mautic\CampaignBundle\Entity\Campaign;
 use Mautic\CampaignBundle\Entity\Event;
+use Mautic\CampaignBundle\Entity\FailedLeadEventLog;
 use Mautic\CampaignBundle\Entity\LeadEventLog as CampaignLeadEventLog;
 use Mautic\CoreBundle\Entity\IpAddress;
 use Mautic\EmailBundle\Entity\Email;
@@ -15,6 +16,7 @@ use Mautic\EmailBundle\Entity\StatDevice;
 use Mautic\LeadBundle\Entity\Lead;
 use Mautic\LeadBundle\Entity\LeadEventLog;
 use Mautic\LeadBundle\Entity\LeadList;
+use Mautic\LeadBundle\Entity\ListLead;
 use Mautic\PageBundle\Entity\Hit;
 use Mautic\PluginBundle\Entity\Integration;
 use Mautic\PluginBundle\Entity\Plugin;
@@ -84,6 +86,54 @@ final class FixtureHelper
         $this->em->flush();
 
         return $contact;
+    }
+
+    /**
+     * Saves a contact with no email that was never identified and never active.
+     *
+     * @param \DateTime $dateAdded when the contact was added
+     *
+     * @return Lead the saved contact
+     */
+    public function createAnonymousContact(\DateTime $dateAdded): Lead
+    {
+        $contact = new Lead();
+        $contact->setDateAdded($dateAdded);
+        $this->em->persist($contact);
+        $this->em->flush();
+
+        return $contact;
+    }
+
+    /**
+     * Adds a contact to a segment, as a segment rebuild does.
+     *
+     * @param Lead     $contact the contact to add
+     * @param LeadList $segment the segment to add it to
+     */
+    public function addContactToSegment(Lead $contact, LeadList $segment): void
+    {
+        $membership = new ListLead();
+        $membership->setLead($contact);
+        $membership->setList($segment);
+        $membership->setDateAdded(new \DateTime());
+        $this->em->persist($membership);
+        $this->em->flush();
+    }
+
+    /**
+     * Marks a campaign event of a contact as failed.
+     *
+     * @param CampaignLeadEventLog $log the campaign event that failed
+     */
+    public function createFailedCampaignEvent(CampaignLeadEventLog $log): void
+    {
+        $failed = new FailedLeadEventLog();
+        $failed->setLog($log);
+        $failed->setReason('Test failure');
+        $failed->setDateAdded(new \DateTime());
+        $this->em->persist($failed);
+        $this->em->flush();
     }
 
     public function createCampaignLeadEventLog(

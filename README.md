@@ -1,6 +1,6 @@
 # Housekeeping by Leuchtfeuer
 
-This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--max-rows`, `--archive`, `--lead-object`, `--ip-addresses`, `--ip-slice`, `--unlink-segments`, `--exclude-segment-emails` and the `housekeeping_skip_email_stats_tokens` setting.
+This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--max-rows`, `--archive`, `--lead-object`, `--ip-addresses`, `--ip-slice`, `--unlink-segments`, `--exclude-segment-emails`, `--anonymous-contacts` and the `housekeeping_skip_email_stats_tokens` setting.
 
 ## Overview / Purpose / Features
 This plugin provides a Mautic Housekeeping Command for database cleanup purposes.
@@ -51,6 +51,7 @@ By default, entries older than 365 days are deleted from the CampaignLeadEventLo
     | --exclude-emails          | Exclude specific email IDs from event log cleanup. Accepts comma-separated list of email IDs (e.g., 1,44,61). Works with --email-stats, --email-stats-tokens and --page-hits.
     | --exclude-segment-emails  | Also exclude every email that a segment filter names, read from all segments when the run starts. Add more filter fields whose values are email IDs, comma-separated (e.g., --exclude-segment-emails=plugin_email_clicked). Works with --email-stats, --email-stats-tokens and --page-hits. Off by default.
     | --unlink-segments         | With --email-stats, remove the segments of each email whose rows are deleted, so it cannot be sent again to the same contacts. Needs --batch-size. Off by default.
+    | --anonymous-contacts      | Delete the contacts that were never identified and never active, added more than --days-old days ago. Needs --batch-size. Not part of the default cleanup.
     | --ip-addresses            | Delete the rows of ip_addresses that no other table uses. Needs --batch-size. Not part of the default cleanup.
     | --ip-slice                | With --ip-addresses, check only slice N of M of the IDs, for example 5/31. Off by default.
 ```
@@ -110,6 +111,35 @@ A segment can filter on one email, with "Read a specific email" or "Was sent a s
 - With `--unlink-segments`, the variants and translations of a named email keep their `email_stats` rows and their segments too.
 ```
 bin/console leuchtfeuer:housekeeping --email-stats --page-hits --exclude-segment-emails --days-old=365 --batch-size=5000
+```
+
+### Anonymous contacts that were never active
+Mautic's own `mautic:maintenance:cleanup` deletes anonymous contacts by their last activity. A contact whose `last_active` is empty never matches, so it stays for good. With `--gdpr` the command does reach these contacts, but it deletes identified contacts too.
+
+`--anonymous-contacts` deletes the contacts that:
+- were never identified (`date_identified` is empty) and were never active (`last_active` is empty),
+- were added more than `--days-old` days ago (a contact with no `date_added` stays),
+- have every unique identifier field empty, `email` included. The fields are read from `lead_fields` when the run starts, so an identifier field you added counts too,
+- have no row in a table whose foreign key to `leads` does not cascade, such as `page_hits`, `email_stats` or `form_submissions`. Such a row means the contact did something. These tables are read from the database when the run starts.
+
+How a run works:
+- The rows that a foreign key cascade removes with a contact go too: its segment memberships, its `lead_event_log` rows, its IP links, its campaign memberships and the like.
+- It needs `--batch-size`. `--max-rows` counts the contacts, not the rows their cascade removes.
+- Each batch runs at READ COMMITTED, so it locks only the contacts it deletes. If binary logging is on, `binlog_format` must be `ROW` or `MIXED`.
+- Each batch checks again, under lock, that no row in those other tables points at its contacts. If one does, the batch is rolled back and the run stops.
+- With `--archive`, each batch copies its contacts to `housekeeping_archive_leads` and the rows their cascade removes to `housekeeping_archive_<table>`, in the same transaction. Before it copies, it checks that no table points at those rows, because the delete would change such a row without a copy, for example a `campaign_lead_event_failed_log` row. If one does, the batch is rolled back and the run stops. The output says how many rows the cascade removed from each table.
+- `--dry-run` counts the contacts and the rows their cascade would remove from each table.
+- Rows in tables with no foreign key, such as `integration_entity`, keep the contact's ID, as with Mautic's own cleanup.
+
+To put contacts back, copy them first, then their rows. `housekeeping_archive_leads` has `generated_email_domain` as a plain column, so leave it out of the column list:
+```
+INSERT INTO leads (<all columns except generated_email_domain>) SELECT <same columns> FROM housekeeping_archive_leads WHERE ...;
+INSERT INTO lead_lists_leads SELECT * FROM housekeeping_archive_lead_lists_leads WHERE lead_id IN (...);
+```
+Do the same for each other `housekeeping_archive_` table the run filled, for example `lead_event_log` and `lead_ips_xref`.
+
+```
+bin/console leuchtfeuer:housekeeping --anonymous-contacts --days-old=180 --batch-size=500 --max-rows=100000 --archive
 ```
 
 ### Unused IP addresses
