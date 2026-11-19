@@ -51,6 +51,7 @@ class EventLogCleanupCommand extends Command
                     new InputOption('exclude-segment-emails', null, InputOption::VALUE_OPTIONAL, 'Also exclude every email that a segment filter names, so deleting its rows cannot change who is in the segment. The filters of every segment, published or not, are read once when the run starts. Reads the '.implode(' and ', EventLogCleanup::SEGMENT_EMAIL_FIELDS).' filters, and also the filter fields you list, comma-separated, whose values are email IDs, such as one a plugin adds. If a filter cannot be read, the run stops before it deletes anything. Works with --email-stats, --email-stats-tokens and --page-hits.', false),
                     new InputOption('unlink-segments', null, InputOption::VALUE_NONE, 'With --email-stats, remove the segments of each email whose email_stats rows are deleted, and of its variants and translations, in the same transaction, so publishing it again cannot send it a second time to the same contacts. The removed links are kept in a '.EventLogCleanup::ARCHIVE_PREFIX.EventLogCleanup::EMAIL_LIST_XREF.' table. The email_stats of a closed email are kept while one of its variants or translations is still open or in --exclude-emails. Needs --batch-size.'),
                     new InputOption('ip-addresses', null, InputOption::VALUE_NONE, 'Delete the ip_addresses rows that no table uses. A row counts as used when a table with a foreign key to ip_addresses or a '.EventLogCleanup::ARCHIVE_PREFIX.'<table> table points at it. Any other table with the same column stops the run. The newest '.EventLogCleanup::IP_KEEP_NEWEST.' IDs are never touched. Needs --batch-size. Not part of the default cleanup. --days-old has no effect on it.'),
+                    new InputOption('anonymous-contacts', null, InputOption::VALUE_NONE, 'Delete the contacts that were never identified and never active, added more than --days-old days ago, with every unique identifier field empty, email included, and no row in a table whose foreign key to leads does not cascade, such as a page hit, a send or a form submission. The rows that a cascade removes with them go too, and --archive keeps a copy of those and of the contacts. Each batch runs at READ COMMITTED. Needs --batch-size. Not part of the default cleanup.'),
                     new InputOption('ip-slice', null, InputOption::VALUE_REQUIRED, 'With --ip-addresses, check only slice N of M, for example 5/31. The IDs are cut into blocks of '.EventLogCleanup::IP_SLICE_BLOCK.', and slice N takes block N and every Mth block after it. Off by default, so every ID is checked.'),
                     new InputOption('optimize-tables', 'o', InputOption::VALUE_NONE, 'Optimize all database tables. If no cleanup flag is set, only the optimization runs and no data is deleted.'),
                 ]
@@ -81,6 +82,9 @@ class EventLogCleanupCommand extends Command
 
                 Check only slice 5 of 31 of the ip_addresses IDs, so a nightly run stays short:
                 <info>php %command.full_name% --ip-addresses --ip-slice=5/31 --batch-size=1000</info>
+
+                Delete the anonymous contacts that were never active and were added more than 180 days ago, with a copy of each and of the rows that go with them:
+                <info>php %command.full_name% --anonymous-contacts --days-old=180 --batch-size=500 --archive</info>
 
                 If you run --optimize-tables on its own, with no other cleanup flag, no data is deleted. Only the table optimization runs:
                 <info>php %command.full_name% --optimize-tables</info>
@@ -132,11 +136,12 @@ class EventLogCleanupCommand extends Command
             return Command::FAILURE;
         }
 
-        $archive        = (bool) $input->getOption('archive');
-        $ipAddresses    = (bool) $input->getOption('ip-addresses');
-        $unlinkSegments = (bool) $input->getOption('unlink-segments');
+        $archive           = (bool) $input->getOption('archive');
+        $ipAddresses       = (bool) $input->getOption('ip-addresses');
+        $unlinkSegments    = (bool) $input->getOption('unlink-segments');
+        $anonymousContacts = (bool) $input->getOption('anonymous-contacts');
 
-        foreach (['max-rows' => null !== $maxRows, 'archive' => $archive, 'ip-addresses' => $ipAddresses, 'unlink-segments' => $unlinkSegments] as $option => $given) {
+        foreach (['max-rows' => null !== $maxRows, 'archive' => $archive, 'ip-addresses' => $ipAddresses, 'unlink-segments' => $unlinkSegments, 'anonymous-contacts' => $anonymousContacts] as $option => $given) {
             if ($given && null === $batchSize) {
                 $output->writeln('<error>--'.$option.' needs --batch-size.</error>');
 
@@ -191,6 +196,7 @@ class EventLogCleanupCommand extends Command
             EventLogCleanup::EMAIL_STATS          => $input->getOption('email-stats'),
             EventLogCleanup::EMAIL_STATS_TOKENS   => $input->getOption('email-stats-tokens'),
             EventLogCleanup::PAGE_HITS            => $input->getOption('page-hits'),
+            EventLogCleanup::ANONYMOUS_CONTACTS   => $anonymousContacts,
             EventLogCleanup::IP_ADDRESSES         => $ipAddresses,
         ];
 
@@ -202,6 +208,7 @@ class EventLogCleanupCommand extends Command
             // No flag at all was given. Fall back to the default full cleanup.
             $operations                                      = array_combine(array_keys($operations), array_fill(0, count($operations), true));
             $operations[EventLogCleanup::EMAIL_STATS_TOKENS] = false;
+            $operations[EventLogCleanup::ANONYMOUS_CONTACTS] = false;
             $operations[EventLogCleanup::IP_ADDRESSES]       = false;
         }
 
