@@ -2,18 +2,18 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Integration;
+namespace MauticPlugin\HousekeepingBundle\Integration;
 
 use Mautic\IntegrationsBundle\Integration\BasicIntegration;
 use Mautic\IntegrationsBundle\Integration\ConfigurationTrait;
 use Mautic\IntegrationsBundle\Integration\Interfaces\BasicInterface;
 
-class HousekeepingLeuchtfeuerIntegration extends BasicIntegration implements BasicInterface
+class HousekeepingIntegration extends BasicIntegration implements BasicInterface
 {
     use ConfigurationTrait;
 
-    public const INTEGRATION_NAME = 'housekeepingleuchtfeuer';
-    public const DISPLAY_NAME     = 'Housekeeping';
+    public const INTEGRATION_NAME = 'housekeeping';
+    public const DISPLAY_NAME     = 'Mautic Housekeeping';
 
     public function getName(): string
     {
@@ -27,6 +27,6 @@ class HousekeepingLeuchtfeuerIntegration extends BasicIntegration implements Bas
 
     public function getIcon(): string
     {
-        return 'plugins/LeuchtfeuerHousekeepingBundle/Assets/img/icon.png';
+        return 'plugins/HousekeepingBundle/Assets/img/icon.png';
     }
 }

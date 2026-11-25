@@ -2,10 +2,10 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Command;
+namespace MauticPlugin\HousekeepingBundle\Tests\Command;
 
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Command\EventLogCleanupCommand;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Service\EventLogCleanup;
+use MauticPlugin\HousekeepingBundle\Command\EventLogCleanupCommand;
+use MauticPlugin\HousekeepingBundle\Service\EventLogCleanup;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Console\Output\OutputInterface;
 use Symfony\Component\Console\Tester\CommandTester;

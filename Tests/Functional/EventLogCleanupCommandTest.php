@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Functional;
+namespace MauticPlugin\HousekeepingBundle\Tests\Functional;
 
 use Mautic\CampaignBundle\Entity\LeadEventLog as CampaignLeadEventLog;
 use Mautic\CoreBundle\Test\MauticMysqlTestCase;
@@ -10,7 +10,7 @@ use Mautic\EmailBundle\Entity\Stat as EmailStat;
 use Mautic\EmailBundle\Entity\StatDevice;
 use Mautic\LeadBundle\Entity\LeadEventLog;
 use Mautic\PageBundle\Entity\Hit;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Fixtures\FixtureHelper;
+use MauticPlugin\HousekeepingBundle\Tests\Fixtures\FixtureHelper;
 
 final class EventLogCleanupCommandTest extends MauticMysqlTestCase
 {
@@ -34,7 +34,7 @@ final class EventLogCleanupCommandTest extends MauticMysqlTestCase
         ]);
 
         $output = $commandTester->getDisplay();
-        $this->assertStringContainsString('Housekeeping by Leuchtfeuer is currently not enabled', $output);
+        $this->assertStringContainsString('Mautic Housekeeping is currently not enabled', $output);
     }
 
     // ========== Default Behavior Tests ==========

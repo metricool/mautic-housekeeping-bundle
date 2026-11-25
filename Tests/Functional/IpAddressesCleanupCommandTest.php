@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Functional;
+namespace MauticPlugin\HousekeepingBundle\Tests\Functional;
 
 use Doctrine\DBAL\DriverManager;
 use Mautic\CoreBundle\Test\MauticMysqlTestCase;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Service\EventLogCleanup;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Fixtures\FixtureHelper;
+use MauticPlugin\HousekeepingBundle\Service\EventLogCleanup;
+use MauticPlugin\HousekeepingBundle\Tests\Fixtures\FixtureHelper;
 
 final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
 {

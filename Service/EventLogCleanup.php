@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Service;
+namespace MauticPlugin\HousekeepingBundle\Service;
 
 use Doctrine\DBAL\ArrayParameterType;
 use Doctrine\DBAL\Connection;
 use Doctrine\DBAL\Exception\RetryableException;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Integration\Config;
+use MauticPlugin\HousekeepingBundle\Integration\Config;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\Console\Output\OutputInterface;
 
@@ -314,7 +314,7 @@ class EventLogCleanup
     public function deleteEventLogEntries(int $daysOld, ?int $campaignId, bool $dryRun, array $operations, OutputInterface $output, ?array $excludeEmailIds = null, ?int $batchSize = null, ?int $maxRows = null, bool $archive = false): string
     {
         if (!$this->config->isPublished()) {
-            return 'Housekeeping by Leuchtfeuer is currently not enabled. To use it, please enable the plugin in your Mautic plugin management.';
+            return 'Mautic Housekeeping is currently not enabled. To use it, please enable the plugin in your Mautic plugin management.';
         }
 
         $this->queriesTemplate = $this->defaultQueries;

@@ -2,14 +2,14 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\DependencyInjection;
+namespace MauticPlugin\HousekeepingBundle\DependencyInjection;
 
 use Symfony\Component\Config\FileLocator;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Extension\Extension;
 use Symfony\Component\DependencyInjection\Loader\PhpFileLoader;
 
-class LeuchtfeuerHousekeepingExtension extends Extension
+class HousekeepingExtension extends Extension
 {
     /**
      * @param mixed[] $configs

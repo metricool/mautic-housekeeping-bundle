@@ -3,10 +3,10 @@
 declare(strict_types=1);
 
 use Mautic\CoreBundle\DependencyInjection\MauticCoreExtension;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Integration\Config;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Integration\HousekeepingLeuchtfeuerIntegration;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Integration\Support\ConfigSupport;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Service\EventLogCleanup;
+use MauticPlugin\HousekeepingBundle\Integration\Config;
+use MauticPlugin\HousekeepingBundle\Integration\HousekeepingIntegration;
+use MauticPlugin\HousekeepingBundle\Integration\Support\ConfigSupport;
+use MauticPlugin\HousekeepingBundle\Service\EventLogCleanup;
 use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 
 use function Symfony\Component\DependencyInjection\Loader\Configurator\service;
@@ -22,16 +22,16 @@ return static function (ContainerConfigurator $configurator): void {
         'Service/EventLogCleanup.php',
     ];
 
-    $services->load('MauticPlugin\\LeuchtfeuerHousekeepingBundle\\', '../')
+    $services->load('MauticPlugin\\HousekeepingBundle\\', '../')
         ->exclude('../{'.implode(',', array_merge(MauticCoreExtension::DEFAULT_EXCLUDES, $excludes)).'}');
 
-    $services->get(HousekeepingLeuchtfeuerIntegration::class)
+    $services->get(HousekeepingIntegration::class)
         ->tag('mautic.integration')
         ->tag('mautic.basic_integration');
     $services->get(ConfigSupport::class)
         ->tag('mautic.config_integration');
 
-    $services->alias('mautic.integration.housekeepingleuchtfeuer', HousekeepingLeuchtfeuerIntegration::class);
+    $services->alias('mautic.integration.housekeeping', HousekeepingIntegration::class);
 
     $services->set(EventLogCleanup::class)
         ->autowire(false)

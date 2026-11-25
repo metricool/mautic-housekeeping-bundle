@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Integration\Support;
+namespace MauticPlugin\HousekeepingBundle\Integration\Support;
 
 use Mautic\IntegrationsBundle\Integration\DefaultConfigFormTrait;
 use Mautic\IntegrationsBundle\Integration\Interfaces\ConfigFormInterface;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Integration\HousekeepingLeuchtfeuerIntegration;
+use MauticPlugin\HousekeepingBundle\Integration\HousekeepingIntegration;
 
-class ConfigSupport extends HousekeepingLeuchtfeuerIntegration implements ConfigFormInterface
+class ConfigSupport extends HousekeepingIntegration implements ConfigFormInterface
 {
     use DefaultConfigFormTrait;
 }
