@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\EventListener;
+namespace MauticPlugin\HousekeepingBundle\EventListener;
 
 use Mautic\CoreBundle\Helper\CoreParametersHelper;
 use Mautic\EmailBundle\Event\EmailStatEvent;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Integration\Config;
+use MauticPlugin\HousekeepingBundle\Integration\Config;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 
 class EmailStatTokensSubscriber implements EventSubscriberInterface

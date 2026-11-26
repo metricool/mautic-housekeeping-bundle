@@ -8,7 +8,7 @@ on:
   pull_request:
 
 env:
-  PLUGIN_DIR: plugins/LeuchtfeuerHousekeepingBundle
+  PLUGIN_DIR: plugins/HousekeepingBundle
 
 jobs:
   phpunit:

@@ -1,6 +1,6 @@
-# Housekeeping by Leuchtfeuer
+# Mautic Housekeeping
 
-This is a modified fork of [Leuchtfeuer's Housekeeping bundle](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), kept by Metricool for its own use since 2026-11-05. It adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--max-rows`, `--archive`, `--lead-object`, `--ip-addresses`, `--ip-slice`, `--unlink-segments`, `--exclude-segment-emails` and the `housekeeping_skip_email_stats_tokens` setting.
+Mautic Housekeeping deletes old rows from Mautic's largest tables, so the database stays small. It started from Leuchtfeuer's Housekeeping bundle (see Credits) and adds `--exclude-emails` on `--page-hits`, `--batch-size`, `--max-rows`, `--archive`, `--lead-object`, `--ip-addresses`, `--ip-slice`, `--unlink-segments`, `--exclude-segment-emails` and the `housekeeping_skip_email_stats_tokens` setting.
 
 ## Overview / Purpose / Features
 This plugin provides a Mautic Housekeeping Command for database cleanup purposes.
@@ -11,16 +11,22 @@ This plugin provides a Mautic Housekeeping Command for database cleanup purposes
 
 ## Installation
 ### Composer
-This plugin can be installed through composer.
+This plugin can be installed through composer, as `metricool/mautic-housekeeping-bundle`. It goes into `plugins/HousekeepingBundle`.
 ### Manual Installation
 Alternatively, it can be installed manually, following the usual steps:
 - Download the plugin
 - Unzip to the Mautic `plugins` directory
-- Rename folder to `LeuchtfeuerHousekeepingBundle`
+- Rename folder to `HousekeepingBundle`
 - In the Mautic backend, go to the `Plugins` page as an administrator
 - Click on the `Install/Upgrade Plugins` button to install the Plugin.
   OR
 - If you have shell access, execute `php bin\console cache:clear` and `php bin\console mautic:plugins:reload` to install the plugins.
+### Turn it on
+After either way of installing, open "Mautic Housekeeping" on the `Plugins` page, set `Is Enabled?` to `Yes` and save. Until then the command stops with "not enabled" and `housekeeping_skip_email_stats_tokens` does nothing.
+### Moving from Housekeeping by Leuchtfeuer
+The old plugin's switch does not carry over. After the move:
+- Remove `plugins/LeuchtfeuerHousekeepingBundle`, install this plugin and turn it on again.
+- Change every crontab line from `leuchtfeuer:housekeeping` to `mautic:housekeeping`.
 
 
 ## Command
@@ -29,7 +35,7 @@ Command to delete lead_event_log table entries, campaign_lead_event_log table en
 Important: If referenced email is ever switched back to published, the contacts will get the email again.
 
 ```
-bin/console leuchtfeuer:housekeeping
+bin/console mautic:housekeeping
 ```
 By default, entries older than 365 days are deleted from the CampaignLeadEventLog, LeadEventLog, EmailStats (only email_stats entries that referenced emails entry is currently not published), EmailStatsDevices and PageHit tables.
 
@@ -80,7 +86,7 @@ OP="put_your_operator_here" #(for example "-m" for emails / "-p" for page_hits |
 
 seq $START -1 $END |while read i ; do
 echo "********** $i **********" >> $OUT
-$TIME -ao $OUT sudo -u www-data php $DOCROOT/bin/console leu:hou $OP -d $i 2>&1 >>$OUT
+$TIME -ao $OUT sudo -u www-data php $DOCROOT/bin/console mautic:housekeeping $OP -d $i 2>&1 >>$OUT
 sleep 2
 done
 ```
@@ -96,7 +102,7 @@ A segment email goes to the contacts in its segments who have no `email_stats` r
 - The removed links do not count towards `--max-rows`. Each email loses its links only when the run deletes rows of it, so the limit bounds them too.
 - It needs `--batch-size`. A dry run counts the links it would remove.
 ```
-bin/console leuchtfeuer:housekeeping --email-stats --unlink-segments --days-old=365 --batch-size=5000
+bin/console mautic:housekeeping --email-stats --unlink-segments --days-old=365 --batch-size=5000
 ```
 
 ### Emails named in segment filters
@@ -109,7 +115,7 @@ A segment can filter on one email, with "Read a specific email" or "Was sent a s
 - The filters are read once per run. A filter added during a run counts from the next run.
 - With `--unlink-segments`, the variants and translations of a named email keep their `email_stats` rows and their segments too.
 ```
-bin/console leuchtfeuer:housekeeping --email-stats --page-hits --exclude-segment-emails --days-old=365 --batch-size=5000
+bin/console mautic:housekeeping --email-stats --page-hits --exclude-segment-emails --days-old=365 --batch-size=5000
 ```
 
 ### Unused IP addresses
@@ -137,7 +143,7 @@ How a run works:
 One slice a night:
 Checking every address of a large table can take hours. `--ip-slice=N/M` checks one slice instead. The IDs are cut into blocks of 100000. Slice N takes block N, then every Mth block after it. Run a different N each night, and the whole table is checked every M nights:
 ```
-bin/console leuchtfeuer:housekeeping --ip-addresses --ip-slice=5/31 --batch-size=1000 --max-rows=200000 --archive
+bin/console mautic:housekeeping --ip-addresses --ip-slice=5/31 --batch-size=1000 --max-rows=200000 --archive
 ```
 In a crontab, write each `%` as `\%`. This value picks the next slice every day, so each slice runs every 31 days:
 ```
@@ -149,10 +155,10 @@ A run without `--ip-slice` checks the whole table in one go. If it stops, run it
 
 `--dry-run` counts what a run would delete, in the same small steps and outside any transaction. It reads as much as a real run, so try it on one slice first.
 
-### Author
-Leuchtfeuer Digital Marketing GmbH
+## Credits
+Based on [Housekeeping by Leuchtfeuer](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), modified since 5 November 2026.
 
-mautic@Leuchtfeuer.com
+Original author: Leuchtfeuer Digital Marketing GmbH, mautic@Leuchtfeuer.com
 
 ## License
-This plugin is licensed under the GPL v3 License.
+This plugin is licensed under the GPL v3 License, or any later version, as the original. See [LICENSE](LICENSE).

@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Fixtures;
+namespace MauticPlugin\HousekeepingBundle\Tests\Fixtures;
 
 use Doctrine\ORM\EntityManagerInterface;
 use Mautic\CampaignBundle\Entity\Campaign;
@@ -18,7 +18,7 @@ use Mautic\LeadBundle\Entity\LeadList;
 use Mautic\PageBundle\Entity\Hit;
 use Mautic\PluginBundle\Entity\Integration;
 use Mautic\PluginBundle\Entity\Plugin;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Integration\HousekeepingLeuchtfeuerIntegration;
+use MauticPlugin\HousekeepingBundle\Integration\HousekeepingIntegration;
 
 final class FixtureHelper
 {
@@ -30,14 +30,14 @@ final class FixtureHelper
     public function enablePlugin(): void
     {
         $plugin = new Plugin();
-        $plugin->setName('Housekeeping by Leuchtfeuer');
-        $plugin->setBundle('LeuchtfeuerHousekeepingBundle');
+        $plugin->setName('Mautic Housekeeping');
+        $plugin->setBundle('HousekeepingBundle');
         $this->em->persist($plugin);
 
         $integration = new Integration();
         $integration->setPlugin($plugin);
         $integration->setIsPublished(true);
-        $integration->setName(HousekeepingLeuchtfeuerIntegration::INTEGRATION_NAME);
+        $integration->setName(HousekeepingIntegration::INTEGRATION_NAME);
         $this->em->persist($integration);
         $this->em->flush();
     }

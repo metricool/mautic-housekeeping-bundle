@@ -2,14 +2,14 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\EventListener;
+namespace MauticPlugin\HousekeepingBundle\Tests\EventListener;
 
 use Mautic\CoreBundle\Helper\CoreParametersHelper;
 use Mautic\EmailBundle\EmailEvents;
 use Mautic\EmailBundle\Entity\Stat;
 use Mautic\EmailBundle\Event\EmailStatEvent;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\EventListener\EmailStatTokensSubscriber;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Integration\Config;
+use MauticPlugin\HousekeepingBundle\EventListener\EmailStatTokensSubscriber;
+use MauticPlugin\HousekeepingBundle\Integration\Config;
 use PHPUnit\Framework\TestCase;
 
 final class EmailStatTokensSubscriberTest extends TestCase

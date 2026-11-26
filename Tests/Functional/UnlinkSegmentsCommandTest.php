@@ -2,13 +2,13 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Functional;
+namespace MauticPlugin\HousekeepingBundle\Tests\Functional;
 
 use Mautic\CoreBundle\Test\MauticMysqlTestCase;
 use Mautic\EmailBundle\Entity\Email;
 use Mautic\EmailBundle\Entity\Stat as EmailStat;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Service\EventLogCleanup;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Fixtures\FixtureHelper;
+use MauticPlugin\HousekeepingBundle\Service\EventLogCleanup;
+use MauticPlugin\HousekeepingBundle\Tests\Fixtures\FixtureHelper;
 
 final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
 {
@@ -39,7 +39,7 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
         $email   = $this->fixtureHelper->createSegmentEmail('Unlink Closed Email', false, [$first, $second]);
         $stat    = $this->fixtureHelper->createEmailStat($contact, $email, $this->fixtureHelper->daysAgo(400));
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'        => 30,
             '--email-stats'     => true,
             '--unlink-segments' => true,
@@ -70,7 +70,7 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
         $email   = $this->fixtureHelper->createSegmentEmail('Unlink Recent Email', false, [$segment]);
         $stat    = $this->fixtureHelper->createEmailStat($contact, $email, $this->fixtureHelper->daysAgo(10));
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'        => 30,
             '--email-stats'     => true,
             '--unlink-segments' => true,
@@ -96,7 +96,7 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
         $variant = $this->fixtureHelper->createSegmentEmail('Unlink Closed Variant', false, [$segment], $parent);
         $stat    = $this->fixtureHelper->createEmailStat($contact, $variant, $this->fixtureHelper->daysAgo(400));
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'        => 30,
             '--email-stats'     => true,
             '--unlink-segments' => true,
@@ -126,7 +126,7 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
         $parentStat  = $this->fixtureHelper->createEmailStat($contact, $parent, $this->fixtureHelper->daysAgo(400));
         $stat        = $this->fixtureHelper->createEmailStat($contact, $translation, $this->fixtureHelper->daysAgo(400));
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'        => 30,
             '--email-stats'     => true,
             '--unlink-segments' => true,
@@ -157,7 +157,7 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
         $variant = $this->fixtureHelper->createSegmentEmail('Unlink Rerun Variant', false, [$segment], $parent);
         $stat    = $this->fixtureHelper->createEmailStat($contact, $variant, $this->fixtureHelper->daysAgo(400));
 
-        $firstRun = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $firstRun = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'        => 30,
             '--email-stats'     => true,
             '--unlink-segments' => true,
@@ -169,7 +169,7 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
 
         $this->em->getConnection()->update(MAUTIC_TABLE_PREFIX.'emails', ['is_published' => 0], ['id' => (int) $parent->getId()]);
 
-        $secondRun = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $secondRun = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'        => 30,
             '--email-stats'     => true,
             '--unlink-segments' => true,
@@ -195,7 +195,7 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
         $translation = $this->fixtureHelper->createSegmentEmail('Unlink Closed Translation', false, [$segment], null, $parent);
         $stat        = $this->fixtureHelper->createEmailStat($contact, $translation, $this->fixtureHelper->daysAgo(400));
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'        => 30,
             '--email-stats'     => true,
             '--unlink-segments' => true,
@@ -220,7 +220,7 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
         $email   = $this->fixtureHelper->createSegmentEmail('Unlink Dry Email', false, [$segment]);
         $stat    = $this->fixtureHelper->createEmailStat($contact, $email, $this->fixtureHelper->daysAgo(400));
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'        => 30,
             '--email-stats'     => true,
             '--unlink-segments' => true,
@@ -246,7 +246,7 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
         $email   = $this->fixtureHelper->createSegmentEmail('Unlink Off Email', false, [$segment]);
         $stat    = $this->fixtureHelper->createEmailStat($contact, $email, $this->fixtureHelper->daysAgo(400));
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'    => 30,
             '--email-stats' => true,
             '--batch-size'  => 1,
@@ -262,7 +262,7 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
 
     public function testNeedsEmailStats(): void
     {
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--page-hits'       => true,
             '--unlink-segments' => true,
             '--batch-size'      => 1,
@@ -274,7 +274,7 @@ final class UnlinkSegmentsCommandTest extends MauticMysqlTestCase
 
     public function testNeedsABatchSize(): void
     {
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--email-stats'     => true,
             '--unlink-segments' => true,
         ]);

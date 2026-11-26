@@ -2,12 +2,12 @@
 
 declare(strict_types=1);
 
-namespace MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Functional;
+namespace MauticPlugin\HousekeepingBundle\Tests\Functional;
 
 use Mautic\CoreBundle\Test\MauticMysqlTestCase;
 use Mautic\EmailBundle\Entity\Stat;
 use Mautic\EmailBundle\Model\EmailModel;
-use MauticPlugin\LeuchtfeuerHousekeepingBundle\Tests\Fixtures\FixtureHelper;
+use MauticPlugin\HousekeepingBundle\Tests\Fixtures\FixtureHelper;
 
 final class EmailStatTokensDefaultTest extends MauticMysqlTestCase
 {
