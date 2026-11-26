@@ -21,6 +21,12 @@ Alternatively, it can be installed manually, following the usual steps:
 - Click on the `Install/Upgrade Plugins` button to install the Plugin.
   OR
 - If you have shell access, execute `php bin\console cache:clear` and `php bin\console mautic:plugins:reload` to install the plugins.
+### Turn it on
+After either way of installing, open "Mautic Housekeeping" on the `Plugins` page, set `Is Enabled?` to `Yes` and save. Until then the command stops with "not enabled" and `housekeeping_skip_email_stats_tokens` does nothing.
+### Moving from Housekeeping by Leuchtfeuer
+The old plugin's switch does not carry over. After the move:
+- Remove `plugins/LeuchtfeuerHousekeepingBundle`, install this plugin and turn it on again.
+- Change every crontab line from `leuchtfeuer:housekeeping` to `mautic:housekeeping`.
 
 
 ## Command
