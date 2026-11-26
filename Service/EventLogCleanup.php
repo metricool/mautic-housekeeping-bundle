@@ -205,6 +205,13 @@ class EventLogCleanup
     private array $cascadeRows = [];
 
     /**
+     * The rows that point at rows the cascade of the anonymous contacts cleanup would remove, for each table without the prefix, counted on a dry run.
+     *
+     * @var array<string, int>
+     */
+    private array $belowRows = [];
+
+    /**
      * @var array<string, string>
      */
     private readonly array $defaultQueries;
@@ -420,6 +427,7 @@ class EventLogCleanup
         $anonymousContacts   = (bool) ($operations[self::ANONYMOUS_CONTACTS] ?? false);
         $this->contactGuards = [];
         $this->cascadeRows   = [];
+        $this->belowRows     = [];
 
         if ($anonymousContacts) {
             if (!$dryRun && null === $batchSize) {
@@ -542,6 +550,10 @@ class EventLogCleanup
 
         if ([] !== $this->cascadeRows) {
             $message .= ' With the contacts, the cascade '.($dryRun ? 'would remove ' : 'removed ').$this->generateMessage($this->cascadeRows, ' rows.');
+        }
+
+        if ([] !== $this->belowRows) {
+            $message .= ' '.$this->generateMessage($this->belowRows, ' rows point at those rows, so a run with --archive would stop, and a run without it would remove or change them.');
         }
 
         if ($dryRun) {
@@ -1011,20 +1023,40 @@ class EventLogCleanup
 
     /**
      * Counts, on a dry run, the rows that the cascade would remove with the anonymous contacts, for each child table that has some.
+     * It also counts, for each table one level further down, the rows that point at those child rows, each row once.
+     * A run with the archive stops on such a row, and a run without it removes or changes it.
      */
     private function countContactCascades(): void
     {
-        $contacts = 'SELECT '.$this->dbPrefix.self::ANONYMOUS_CONTACTS.'.id FROM '.str_replace(self::PREFIX, $this->dbPrefix, $this->queriesTemplate[self::ANONYMOUS_CONTACTS]);
+        $contacts   = 'SELECT '.$this->dbPrefix.self::ANONYMOUS_CONTACTS.'.id FROM '.str_replace(self::PREFIX, $this->dbPrefix, $this->queriesTemplate[self::ANONYMOUS_CONTACTS]);
+        $conditions = [];
 
         foreach ($this->findCascadeChildren($this->dbPrefix.self::ANONYMOUS_CONTACTS, true) as $child => $childColumn) {
-            $rows = (int) $this->connection->executeQuery(
-                'SELECT COUNT(*) FROM '.$child.' WHERE '.$child.'.'.$childColumn.' IN ('.$contacts.')',
+            $childRows = $child.' WHERE '.$child.'.'.$childColumn.' IN ('.$contacts.')';
+            $rows      = (int) $this->connection->executeQuery(
+                'SELECT COUNT(*) FROM '.$childRows,
                 $this->params[self::ANONYMOUS_CONTACTS],
                 $this->types[self::ANONYMOUS_CONTACTS]
             )->fetchOne();
 
             if ($rows > 0) {
                 $this->cascadeRows[substr($child, strlen($this->dbPrefix))] = $rows;
+            }
+
+            foreach ($this->readForeignKeys($child) as $key) {
+                $conditions[$key['child_table']][] = $key['child_table'].'.'.$key['child_column'].' IN (SELECT '.$child.'.'.$key['referenced_column'].' FROM '.$childRows.')';
+            }
+        }
+
+        foreach ($conditions as $below => $pointers) {
+            $rows = (int) $this->connection->executeQuery(
+                'SELECT COUNT(*) FROM '.$below.' WHERE '.implode(' OR ', $pointers),
+                $this->params[self::ANONYMOUS_CONTACTS],
+                $this->types[self::ANONYMOUS_CONTACTS]
+            )->fetchOne();
+
+            if ($rows > 0) {
+                $this->belowRows[substr($below, strlen($this->dbPrefix))] = $rows;
             }
         }
     }

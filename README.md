@@ -134,7 +134,7 @@ How a run works:
 - Each batch runs at READ COMMITTED, so it locks only the contacts it deletes. If binary logging is on, `binlog_format` must be `ROW` or `MIXED`.
 - Each batch checks again, under lock, that no row in those other tables points at its contacts. If one does, the batch is rolled back and the run stops.
 - With `--archive`, each batch copies its contacts to `housekeeping_archive_leads` and the rows their cascade removes to `housekeeping_archive_<table>`, in the same transaction. Before it copies, it checks that no table points at those rows, because the delete would change such a row without a copy, for example a `campaign_lead_event_failed_log` row. If one does, the batch is rolled back and the run stops. The output says how many rows the cascade removed from each table.
-- `--dry-run` counts the contacts and the rows their cascade would remove from each table.
+- `--dry-run` counts the contacts and the rows their cascade would remove from each table. It also counts the rows one level further down that point at those rows. A run with `--archive` stops on them, and a run without it removes or changes them.
 - A foreign key from a table in another database stops the run before it deletes anything.
 - Rows in tables with no foreign key, such as `integration_entity`, keep the contact's ID, as with Mautic's own cleanup.
 

@@ -193,6 +193,15 @@ final class AnonymousContactsCommandTest extends MauticMysqlTestCase
 
         $this->fixtureHelper->createFailedCampaignEvent($log);
 
+        $dryRun = $this->testSymfonyCommand('mautic:housekeeping', [
+            '--days-old'           => 30,
+            '--anonymous-contacts' => true,
+            '--batch-size'         => 1,
+            '--dry-run'            => true,
+        ]);
+
+        $this->assertStringContainsString('With the contacts, the cascade would remove 1 campaign_lead_event_log rows. 1 campaign_lead_event_failed_log rows point at those rows, so a run with --archive would stop, and a run without it would remove or change them. This is a dry run.', $dryRun->getDisplay());
+
         $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'           => 30,
             '--anonymous-contacts' => true,
