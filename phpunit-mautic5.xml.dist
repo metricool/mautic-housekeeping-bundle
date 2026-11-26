@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="../../vendor/phpunit/phpunit/phpunit.xsd"
+    backupGlobals="false"
+    backupStaticAttributes="false"
+    colors="true"
+    convertErrorsToExceptions="true"
+    convertNoticesToExceptions="true"
+    convertWarningsToExceptions="true"
+    convertDeprecationsToExceptions="true"
+    processIsolation="false"
+    stopOnFailure="false"
+    bootstrap="../../vendor/autoload.php"
+    failOnRisky="true"
+    failOnWarning="true"
+    cacheResultFile="../../var/cache/phpunit-housekeeping/.phpunit.result.cache"
+  >
+  <coverage>
+    <include>
+      <directory suffix=".php">.</directory>
+    </include>
+    <exclude>
+      <directory>Assets</directory>
+      <directory>Config</directory>
+      <directory>Tests</directory>
+      <directory>vendor</directory>
+    </exclude>
+  </coverage>
+  <testsuites>
+    <testsuite name="Mautic Housekeeping">
+      <directory>Tests</directory>
+    </testsuite>
+  </testsuites>
+  <php>
+    <env name="SYMFONY_DEPRECATIONS_HELPER" value="disabled"/>
+    <env name="MAXMIND_LICENSE_KEY" value=""/>
+    <env name="KERNEL_CLASS" value="AppTestKernel"/>
+    <const name="IS_PHPUNIT" value="true"/>
+    <const name="MAUTIC_ENV" value="test"/>
+    <server name="KERNEL_DIR" value="app"/>
+    <server name="APP_DEBUG" value="0"/>
+    <server name="APP_ENV" value="test" force="true"/>
+    <ini name="error_reporting" value="E_ALL"/>
+    <ini name="date.timezone" value="UTC"/>
+  </php>
+  <listeners>
+    <listener class="\Mautic\CoreBundle\Test\Listeners\CleanupListener"/>
+    <listener class="\Mautic\CoreBundle\Test\Listeners\SeparateProcessListener"/>
+    <listener class="Symfony\Bridge\PhpUnit\SymfonyTestsListener"/>
+  </listeners>
+  <extensions>
+    <extension class="\Mautic\CoreBundle\Test\Hooks\MauticExtension"/>
+  </extensions>
+</phpunit>

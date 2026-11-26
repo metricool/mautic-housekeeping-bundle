@@ -1,0 +1,35 @@
+name: Set up Mautic
+description: Sets up PHP and installs the dependencies of the Mautic release checked out in the workspace.
+
+inputs:
+  php-version:
+    description: PHP version
+    required: false
+    default: '8.3'
+  coverage:
+    description: PHP coverage driver
+    required: false
+    default: none
+
+runs:
+  using: composite
+  steps:
+    - name: Set up PHP
+      uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240
+      with:
+        php-version: ${{ inputs.php-version }}
+        extensions: mbstring, xml, ctype, iconv, intl, imap, zip, gd, bcmath, curl, pdo_sqlite, mysql, pdo_mysql
+        coverage: ${{ inputs.coverage }}
+        ini-values: memory_limit=2G, zend.assertions=1
+        tools: composer:v2
+
+    - name: Cache Composer downloads
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+      with:
+        path: ~/.cache/composer/files
+        key: composer-${{ runner.os }}-${{ hashFiles('composer.lock') }}
+        restore-keys: composer-${{ runner.os }}-
+
+    - name: Install Mautic's dependencies
+      shell: bash
+      run: composer install --no-interaction --no-progress --no-scripts
