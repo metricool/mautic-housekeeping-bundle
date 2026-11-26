@@ -783,7 +783,8 @@ class EventLogCleanup
     }
 
     /**
-     * Reads every foreign key of this database that points at a table, one row per column, ordered by the table and column that point.
+     * Reads every foreign key that points at a table of this database, one row per column, ordered by the table and column that point.
+     * Rejects a key that comes from a table in another database, because a copy, a count or a check here could not reach it.
      *
      * @param string $table the table pointed at, with its prefix
      *
@@ -792,10 +793,16 @@ class EventLogCleanup
     private function readForeignKeys(string $table): array
     {
         $keys = $this->connection->executeQuery(
-            'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column, r.DELETE_RULE AS delete_rule FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.CONSTRAINT_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table ORDER BY k.TABLE_NAME, k.COLUMN_NAME',
+            'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column, r.DELETE_RULE AS delete_rule, k.CONSTRAINT_SCHEMA = DATABASE() AS same_schema FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.REFERENCED_TABLE_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table ORDER BY k.TABLE_NAME, k.COLUMN_NAME',
             ['table' => $table],
             ['table' => \PDO::PARAM_STR]
         )->fetchAllAssociative();
+
+        foreach ($keys as $key) {
+            if (1 !== (int) $key['same_schema']) {
+                throw new \RuntimeException('Cannot work on '.$table.', because '.$key['child_table'].' in another database points at it.');
+            }
+        }
 
         return array_map(static fn (array $key): array => [
             'child_table'       => (string) $key['child_table'],

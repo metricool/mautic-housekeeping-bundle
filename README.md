@@ -74,7 +74,7 @@ housekeeping_skip_email_stats_tokens | Set to true to stop saving tokens in emai
 ### Deleting huge ammounts of data
 - Use `--batch-size` (for example `--batch-size=5000`), so that each batch is committed on its own. If a run stops, what it already committed stays deleted, and running it again carries on. `--campaign-lead` works out which rows to keep for every batch, so use a larger batch size there.
 - Add `--max-rows` a little above what `--dry-run` counts, so a wrong `--days-old` cannot delete far more than you expect. The run then stops at the limit and says so in its output. The rest waits for the next run.
-- Add `--archive` to keep what the run removes, so it can be put back. The archive tables have the same columns as their source table, with no keys, and a generated column such as `email_stats.generated_sent_date` becomes a plain one. If the write and the copy of a batch ever differ, the batch is rolled back and the run stops. The command never empties the archive tables. After a Mautic upgrade changes a table's columns, the next run with `--archive` stops with an error until its archive table is renamed or dropped. A table whose delete would set another table's column to NULL is rejected, and so is one whose cascade does not come through a single key on its id.
+- Add `--archive` to keep what the run removes, so it can be put back. The archive tables have the same columns as their source table, with no keys, and a generated column such as `email_stats.generated_sent_date` becomes a plain one. If the write and the copy of a batch ever differ, the batch is rolled back and the run stops. The command never empties the archive tables. After a Mautic upgrade changes a table's columns, the next run with `--archive` stops with an error until its archive table is renamed or dropped. A table whose delete would set another table's column to NULL is rejected, and so is one whose cascade does not come through a single key on its id, and one that a table in another database points at.
 - It might happen that the plugin fails to delete if the data is too large to handle. In that case: Create the following bash script and iterate through the deletion day by day:
 ```
 #!/bin/sh
@@ -135,6 +135,7 @@ How a run works:
 - Each batch checks again, under lock, that no row in those other tables points at its contacts. If one does, the batch is rolled back and the run stops.
 - With `--archive`, each batch copies its contacts to `housekeeping_archive_leads` and the rows their cascade removes to `housekeeping_archive_<table>`, in the same transaction. Before it copies, it checks that no table points at those rows, because the delete would change such a row without a copy, for example a `campaign_lead_event_failed_log` row. If one does, the batch is rolled back and the run stops. The output says how many rows the cascade removed from each table.
 - `--dry-run` counts the contacts and the rows their cascade would remove from each table.
+- A foreign key from a table in another database stops the run before it deletes anything.
 - Rows in tables with no foreign key, such as `integration_entity`, keep the contact's ID, as with Mautic's own cleanup.
 
 To put contacts back, copy them first, then their rows. `housekeeping_archive_leads` has `generated_email_domain` as a plain column, so leave it out of the column list:

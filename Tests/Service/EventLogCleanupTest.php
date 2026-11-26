@@ -15,7 +15,7 @@ use Symfony\Component\Console\Output\OutputInterface;
 final class EventLogCleanupTest extends TestCase
 {
     private const COLUMNS_SQL = "SELECT CONCAT_WS(' ', COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, CHARACTER_SET_NAME, COLLATION_NAME) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table ORDER BY ORDINAL_POSITION";
-    private const KEYS_SQL    = 'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column, r.DELETE_RULE AS delete_rule FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.CONSTRAINT_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table ORDER BY k.TABLE_NAME, k.COLUMN_NAME';
+    private const KEYS_SQL    = 'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column, r.DELETE_RULE AS delete_rule, k.CONSTRAINT_SCHEMA = DATABASE() AS same_schema FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.REFERENCED_TABLE_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table ORDER BY k.TABLE_NAME, k.COLUMN_NAME';
 
     /**
      * @dataProvider runProvider
@@ -786,10 +786,10 @@ final class EventLogCleanupTest extends TestCase
                 ['SELECT prefix_table_email_stats_devices.id FROM '.$devices.' AND prefix_table_email_stats_devices.id > :lastId ORDER BY prefix_table_email_stats_devices.id LIMIT 2', ['daysOld' => 4, 'lastId' => 0], $selectTypes, []],
                 ['SELECT MIN(id), MAX(id) FROM prefix_table_email_stats', [], [], $noRows],
                 [self::KEYS_SQL, ['table' => 'prefix_table_email_stats'], $keysTypes, [
-                    ['child_table' => 'prefix_table_email_stat_replies', 'child_column' => 'stat_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE'],
-                    ['child_table' => 'prefix_table_email_stats_devices', 'child_column' => 'stat_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE'],
-                    ['child_table' => 'prefix_table_some_report', 'child_column' => 'stat_id', 'referenced_column' => 'id', 'delete_rule' => 'RESTRICT'],
-                    ['child_table' => 'prefix_table_some_report', 'child_column' => 'stat_hash', 'referenced_column' => 'tracking_hash', 'delete_rule' => 'NO ACTION'],
+                    ['child_table' => 'prefix_table_email_stat_replies', 'child_column' => 'stat_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
+                    ['child_table' => 'prefix_table_email_stats_devices', 'child_column' => 'stat_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
+                    ['child_table' => 'prefix_table_some_report', 'child_column' => 'stat_id', 'referenced_column' => 'id', 'delete_rule' => 'RESTRICT', 'same_schema' => '1'],
+                    ['child_table' => 'prefix_table_some_report', 'child_column' => 'stat_hash', 'referenced_column' => 'tracking_hash', 'delete_rule' => 'NO ACTION', 'same_schema' => '1'],
                 ]],
                 [self::KEYS_SQL, ['table' => 'prefix_table_email_stat_replies'], $keysTypes, []],
                 [self::KEYS_SQL, ['table' => 'prefix_table_email_stats_devices'], $keysTypes, []],
@@ -883,7 +883,7 @@ final class EventLogCleanupTest extends TestCase
         yield 'a child copy holds fewer rows than were locked' => [
             [
                 $range,
-                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE']]],
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1']]],
                 [self::KEYS_SQL, ['table' => 'prefix_table_hit_notes'], $keysTypes, []],
                 ['CREATE TABLE IF NOT EXISTS prefix_table_housekeeping_archive_hit_notes SELECT * FROM prefix_table_hit_notes LIMIT 0', [], [], null],
                 [self::COLUMNS_SQL, ['table' => 'prefix_table_housekeeping_archive_hit_notes'], $keysTypes, ['id', 'hit_id']],
@@ -921,16 +921,24 @@ final class EventLogCleanupTest extends TestCase
         yield 'a child set to NULL' => [
             [
                 $range,
-                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'SET NULL']]],
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'SET NULL', 'same_schema' => '1']]],
             ],
             'Cannot archive prefix_table_page_hits, because a delete there changes prefix_table_hit_notes through SET NULL.',
+        ];
+
+        yield 'a child in another database' => [
+            [
+                $range,
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '0']]],
+            ],
+            'Cannot work on prefix_table_page_hits, because prefix_table_hit_notes in another database points at it.',
         ];
 
         yield 'a cascade two levels deep' => [
             [
                 $range,
-                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE']]],
-                [self::KEYS_SQL, ['table' => 'prefix_table_hit_notes'], $keysTypes, [['child_table' => 'prefix_table_note_tags', 'child_column' => 'note_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE']]],
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1']]],
+                [self::KEYS_SQL, ['table' => 'prefix_table_hit_notes'], $keysTypes, [['child_table' => 'prefix_table_note_tags', 'child_column' => 'note_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1']]],
             ],
             'Cannot archive prefix_table_page_hits, because a delete there cascades from prefix_table_hit_notes to further tables.',
         ];
@@ -938,7 +946,7 @@ final class EventLogCleanupTest extends TestCase
         yield 'a cascade through a key on another column' => [
             [
                 $range,
-                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_code', 'referenced_column' => 'code', 'delete_rule' => 'CASCADE']]],
+                [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_code', 'referenced_column' => 'code', 'delete_rule' => 'CASCADE', 'same_schema' => '1']]],
             ],
             'Cannot archive prefix_table_page_hits, because the cascade to prefix_table_hit_notes does not come through one key on its id.',
         ];
@@ -947,8 +955,8 @@ final class EventLogCleanupTest extends TestCase
             [
                 $range,
                 [self::KEYS_SQL, ['table' => 'prefix_table_page_hits'], $keysTypes, [
-                    ['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE'],
-                    ['child_table' => 'prefix_table_hit_notes', 'child_column' => 'first_hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE'],
+                    ['child_table' => 'prefix_table_hit_notes', 'child_column' => 'hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
+                    ['child_table' => 'prefix_table_hit_notes', 'child_column' => 'first_hit_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
                 ]],
             ],
             'Cannot archive prefix_table_page_hits, because the cascade to prefix_table_hit_notes does not come through one key on its id.',
