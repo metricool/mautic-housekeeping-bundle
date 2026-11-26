@@ -1036,6 +1036,42 @@ final class EventLogCleanupTest extends TestCase
     }
 
     /**
+     * Rejects a foreign key from leads to itself before anything is written, because MySQL cannot delete from a table that the same statement reads.
+     *
+     * @dataProvider selfKeyProvider
+     *
+     * @param string $deleteRule what a delete of a contact does to the contacts that point at it
+     */
+    public function testAnonymousContactsRejectAKeyFromLeadsToItself(string $deleteRule): void
+    {
+        $keysTypes  = ['table' => \PDO::PARAM_STR];
+        $connection = $this->createArchiveConnection([
+            [self::CONTACT_COLUMNS_SQL, ['table' => 'prefix_table_leads'], $keysTypes, ['id', 'email', 'referrer_id']],
+            [self::IDENTIFIER_FIELDS_SQL, [], [], []],
+            [self::KEYS_SQL, ['table' => 'prefix_table_leads'], $keysTypes, [
+                ['child_table' => 'prefix_table_lead_notes', 'child_column' => 'lead_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
+                ['child_table' => 'prefix_table_leads', 'child_column' => 'referrer_id', 'referenced_column' => 'id', 'delete_rule' => $deleteRule, 'same_schema' => '1'],
+            ]],
+        ], 0, 0, 0);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Cannot delete anonymous contacts, because prefix_table_leads points at itself through referrer_id.');
+
+        $this->createEventLogCleanup($connection)->deleteEventLogEntries(30, null, true, [EventLogCleanup::ANONYMOUS_CONTACTS => true], $this->createStub(OutputInterface::class));
+    }
+
+    /**
+     * Returns the delete rules a foreign key from leads to itself can have.
+     *
+     * @return \Generator<string, array{string}>
+     */
+    public static function selfKeyProvider(): \Generator
+    {
+        yield 'set to NULL' => ['SET NULL'];
+        yield 'cascading' => ['CASCADE'];
+    }
+
+    /**
      * Returns a connection that expects these queries in this order and answers each with the value given for it.
      *
      * @param list<array{0: string, 1: array<string, mixed>, 2: array<string, int>, 3: mixed}> $calls

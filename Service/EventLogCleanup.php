@@ -983,6 +983,7 @@ class EventLogCleanup
      * No table whose foreign key to leads does not cascade may point at the contact, so a contact with a page hit, a send or a form submission stays.
      * Those tables are kept, so each batch can check them again.
      * Rejects an identifier field with no column in leads, and a foreign key that does not come through one column on the contact's id.
+     * Rejects a foreign key from leads to itself, because MySQL cannot delete from a table that the same statement reads.
      */
     private function prepareAnonymousContacts(): void
     {
@@ -1008,6 +1009,10 @@ class EventLogCleanup
         }
 
         foreach ($this->readForeignKeys($table) as $key) {
+            if ($table === $key['child_table']) {
+                throw new \RuntimeException('Cannot delete anonymous contacts, because '.$table.' points at itself through '.$key['child_column'].'.');
+            }
+
             if ('CASCADE' === $key['delete_rule']) {
                 continue;
             }
