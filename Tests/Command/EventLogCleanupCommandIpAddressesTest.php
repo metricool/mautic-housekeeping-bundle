@@ -186,7 +186,7 @@ final class EventLogCleanupCommandIpAddressesTest extends TestCase
     /**
      * Returns the operations the command passes to the cleanup.
      *
-     * @param bool $others      the value of every operation except the tokens and ip_addresses
+     * @param bool $others      the value of every operation except the tokens, the anonymous contacts and ip_addresses
      * @param bool $ipAddresses the value of the ip_addresses operation
      *
      * @return array<string, bool> the operations in the order the command builds them
@@ -199,6 +199,7 @@ final class EventLogCleanupCommandIpAddressesTest extends TestCase
             EventLogCleanup::EMAIL_STATS          => $others,
             EventLogCleanup::EMAIL_STATS_TOKENS   => false,
             EventLogCleanup::PAGE_HITS            => $others,
+            EventLogCleanup::ANONYMOUS_CONTACTS   => false,
             EventLogCleanup::IP_ADDRESSES         => $ipAddresses,
         ];
     }
