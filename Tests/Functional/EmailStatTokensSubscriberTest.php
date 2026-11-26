@@ -83,9 +83,6 @@ final class EmailStatTokensSubscriberTest extends MauticMysqlTestCase
 
     private function getEmailModel(): EmailModel
     {
-        $model = static::getContainer()->get('mautic.email.model.email');
-        \assert($model instanceof EmailModel);
-
-        return $model;
+        return static::getContainer()->get('mautic.email.model.email');
     }
 }

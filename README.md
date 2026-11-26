@@ -6,8 +6,8 @@ Mautic Housekeeping deletes old rows from Mautic's largest tables, so the databa
 This plugin provides a Mautic Housekeeping Command for database cleanup purposes.
 
 ## Requirements / Version Support
-- Mautic 5.0 - 7.2.1
-- PHP 8.1 or higher
+- Mautic 5.2 or 7.2
+- PHP 8.1 to 8.3 on Mautic 5.2, PHP 8.2 to 8.4 on Mautic 7.2
 
 ## Installation
 ### Composer
@@ -154,6 +154,13 @@ This value moves to the next slice every day, even when `--max-rows` or an error
 A run without `--ip-slice` checks the whole table in one go. If it stops, run it again. It starts from the first ID again.
 
 `--dry-run` counts what a run would delete, in the same small steps and outside any transaction. It reads as much as a real run, so try it on one slice first.
+
+## Code checks
+The code passes PHPStan at level 6 (`phpstan.neon`) and Mautic's PHP-CS-Fixer rules (`.php-cs-fixer.php`), with one difference: `@return` tags that repeat the native type stay.
+
+The checks and the tests run from a Mautic install with its development dependencies, with the plugin in `plugins/HousekeepingBundle`. The tests run on Mautic 7.2 with `phpunit.xml.dist` and on Mautic 5.2 with `phpunit-mautic5.xml.dist` (PHPUnit 9). The other checks run on Mautic 7.2.
+
+GitHub Actions (`.github/workflows/ci.yaml`) run the tests on Mautic 5.2.4 with PHP 8.1, 8.2 and 8.3, on Mautic 7.2.0 with PHP 8.3 and on the latest 7.2 release with PHP 8.2, 8.3 and 8.4, and the other checks on the latest 7.2 release, for every pull request and every push to `main`.
 
 ## Credits
 Based on [Housekeeping by Leuchtfeuer](https://github.com/Leuchtfeuer/mautic-housekeeping-bundle), modified since 5 November 2026.

@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<phpunit xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:noNamespaceSchemaLocation="../../vendor/phpunit/phpunit/phpunit.xsd"
+    backupGlobals="false"
+    backupStaticProperties="false"
+    colors="true"
+    processIsolation="false"
+    stopOnFailure="false"
+    bootstrap="../../vendor/autoload.php"
+    failOnRisky="true"
+    failOnWarning="true"
+    cacheDirectory="../../var/cache/phpunit-housekeeping"
+  >
+  <source>
+    <include>
+      <directory>.</directory>
+    </include>
+    <exclude>
+      <directory>Assets</directory>
+      <directory>Config</directory>
+      <directory>Tests</directory>
+      <directory>vendor</directory>
+    </exclude>
+  </source>
+  <testsuites>
+    <testsuite name="Mautic Housekeeping">
+      <directory>Tests</directory>
+    </testsuite>
+  </testsuites>
+  <php>
+    <env name="SYMFONY_DEPRECATIONS_HELPER" value="weak"/>
+    <env name="MAXMIND_LICENSE_KEY" value=""/>
+    <env name="KERNEL_CLASS" value="AppTestKernel"/>
+    <const name="IS_PHPUNIT" value="true"/>
+    <const name="MAUTIC_ENV" value="test"/>
+    <server name="KERNEL_DIR" value="app"/>
+    <server name="APP_DEBUG" value="0"/>
+    <server name="APP_ENV" value="test" force="true"/>
+    <ini name="error_reporting" value="E_ALL"/>
+    <ini name="date.timezone" value="UTC"/>
+  </php>
+  <extensions>
+    <bootstrap class="\Mautic\CoreBundle\Test\Extensions\SeparateProcess\SeparateProcess"/>
+    <bootstrap class="\Mautic\CoreBundle\Test\Extensions\DbPrefix\DbPrefix"/>
+  </extensions>
+</phpunit>

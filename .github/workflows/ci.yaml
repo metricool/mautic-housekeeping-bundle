@@ -1,139 +1,158 @@
-name: Mautic Plugin tests
+name: CI
 
 on:
+  pull_request:
   push:
     branches:
-      - 'mautic6'
+      - main
 
-  pull_request:
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   PLUGIN_DIR: plugins/HousekeepingBundle
+  DB_HOST: 127.0.0.1
+  DB_USER: root
+  DB_PASSWD: ''
+  DB_NAME: mautictest
 
 jobs:
-  phpunit:
+  latest:
+    name: Latest Mautic 7.2
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.find.outputs.version }}
+    steps:
+      - name: Find the latest 7.2 release
+        id: find
+        run: |
+          version="$(git ls-remote --tags --refs https://github.com/mautic/mautic.git 'refs/tags/7.2.*' | sed 's#.*refs/tags/##' | grep -E '^7\.2\.[0-9]+$' | sort -V | tail -n 1)"
+          test -n "${version}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
 
+  tests:
+    name: Tests on Mautic ${{ matrix.mautic }}, PHP ${{ matrix.php }}
+    needs: latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - php-versions: '8.1'
-            mautic-versions: '5.2'
-          - php-versions: '8.2'
-            mautic-versions: '5.2'
-          - php-versions: '8.3'
-            mautic-versions: '5.2'
-          - php-versions: '8.1'
-            mautic-versions: '6.0'
-          - php-versions: '8.2'
-            mautic-versions: '6.0'
-          - php-versions: '8.3'
-            mautic-versions: '6.0'
-          - php-versions: '8.2'
-            mautic-versions: '7.0'
-          - php-versions: '8.3'
-            mautic-versions: '7.0'
-          - php-versions: '8.4'
-            mautic-versions: '7.0'
-
-    name: Tests on Mautic ${{ matrix.mautic-versions }}, PHP ${{ matrix.php-versions }}, MariaDB
-
+          - mautic: '5.2.4'
+            php: '8.1'
+            database: mysql:8.0
+            phpunit: phpunit-mautic5.xml.dist
+          - mautic: '5.2.4'
+            php: '8.2'
+            database: mysql:8.0
+            phpunit: phpunit-mautic5.xml.dist
+          - mautic: '5.2.4'
+            php: '8.3'
+            database: mysql:8.0
+            phpunit: phpunit-mautic5.xml.dist
+          - mautic: '7.2.0'
+            php: '8.3'
+            database: mysql:8.4
+            phpunit: phpunit.xml.dist
+          - mautic: ${{ needs.latest.outputs.version }}
+            php: '8.2'
+            database: mysql:8.4
+            phpunit: phpunit.xml.dist
+          - mautic: ${{ needs.latest.outputs.version }}
+            php: '8.3'
+            database: mysql:8.4
+            phpunit: phpunit.xml.dist
+          - mautic: ${{ needs.latest.outputs.version }}
+            php: '8.4'
+            database: mysql:8.4
+            phpunit: phpunit.xml.dist
     services:
       database:
-        image: mariadb:10.11
+        image: ${{ matrix.database }}
         env:
-          MYSQL_ALLOW_EMPTY_PASSWORD: yes
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
           MYSQL_DATABASE: mautictest
         ports:
           - 3306
         options: >-
-          --shm-size=2gb
-          --name=mariadb
           --tmpfs=/var/lib/mysql
           --health-cmd="mysqladmin ping"
           --health-interval=10s
           --health-timeout=5s
-          --health-retries=3
-
+          --health-retries=10
     steps:
-      - name: Checkout Mautic
-        uses: actions/checkout@v4
+      - name: Check out Mautic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: mautic/mautic
-          ref: ${{ matrix.mautic-versions }}
+          ref: ${{ matrix.mautic }}
+          persist-credentials: false
 
-      - name: Checkout this plugin
-        uses: actions/checkout@v4
+      - name: Check out the plugin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: ${{ env.PLUGIN_DIR }}
+          persist-credentials: false
 
-      - name: Setup PHP, with composer and extensions
-        uses: shivammathur/setup-php@v2
+      - name: Set up Mautic
+        uses: ./plugins/HousekeepingBundle/.github/actions/setup-mautic
         with:
-          php-version: ${{ matrix.php-versions }}
-          ini-values: -dpcov.enabled=0, pcov.directory=."
-          extensions: mbstring, xml, ctype, iconv, intl, pdo_sqlite, mysql, pdo_mysql
-          coverage: pcov
+          php-version: ${{ matrix.php }}
 
-      - name: add MySQL config file
-        run: |
-          mysqldump --version
-          mysqldump --print-defaults
-          cp .github/ci-files/.my.cnf ~/.my.cnf
-          mysqldump --print-defaults
+      - name: PHPUnit
+        env:
+          DB_PORT: ${{ job.services.database.ports['3306'] }}
+        run: php bin/phpunit -c "${PLUGIN_DIR}/${{ matrix.phpunit }}"
 
-      - name: Set SYMFONY_ENV to test
-        run: |
-          echo "SYMFONY_ENV=test" >> $GITHUB_ENV
-          echo "MAUTIC_ENV=test" >> $GITHUB_ENV
-          echo "MAUTIC_TABLE_PREFIX=mautic_" >> $GITHUB_ENV
-
-      - name: Get composer cache directory
-        id: composer-cache
-        run: echo "dir=$(composer config cache-files-dir)" >> $GITHUB_OUTPUT
-
-      - name: Cache composer dependencies
-        uses: actions/cache@v3
+  checks:
+    name: Static checks on Mautic ${{ needs.latest.outputs.version }}
+    needs: latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      database:
+        image: mysql:8.4
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: mautictest
+        ports:
+          - 3306
+        options: >-
+          --tmpfs=/var/lib/mysql
+          --health-cmd="mysqladmin ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+    steps:
+      - name: Check out Mautic
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          path: ${{ steps.composer-cache.outputs.dir }}
-          key: ${{ runner.os }}-composer-${{ hashFiles('**/composer.lock') }}
-          restore-keys: ${{ runner.os }}-composer-
+          repository: mautic/mautic
+          ref: ${{ needs.latest.outputs.version }}
+          persist-credentials: false
 
-      - name: Install Composer dependencies
-        run: composer install
-
-      - name: Install Mautic
-        env:
-          DB_PORT: ${{ job.services.database.ports[3306] }}
-        run: |
-          cp ./.github/ci-files/local.php ./config/local.php
-          php bin/console mautic:install --force http://localhost
-
-      - name: Install Plugins
-        env:
-          DB_PORT: ${{ job.services.database.ports[3306] }}
-        run: php bin/console mautic:plugins:install --env=dev
-
-      - name: Run Code Style check
-        run: bin/php-cs-fixer fix ${{ env.PLUGIN_DIR }} --config=.php-cs-fixer.php -v --dry-run --show-progress=dots --diff
-
-      - name: PHPSTAN
-        run: composer phpstan -- ${{ env.PLUGIN_DIR }}
-
-      - name: Twig Lint
-        run: bin/console lint:twig ${{ env.PLUGIN_DIR }}
-
-      - name: Rector
-        if: ${{ matrix.mautic-versions != '7.0' }} # to be removed after dropping support for M5
-        run: composer rector -- --dry-run --no-progress-bar ${{ env.PLUGIN_DIR }}
-
-      - name: Run PHPUNIT tests
-        env:
-          DB_PORT: ${{ job.services.database.ports[3306] }}
-        run: XDEBUG_MODE=coverage APP_DEBUG=0 php -dpcov.enabled=1 -dpcov.directory=. -dpcov.exclude="~tests|themes|vendor~" bin/phpunit -d memory_limit=1G --bootstrap vendor/autoload.php --configuration ${{ env.PLUGIN_DIR }}/phpunit.xml --coverage-clover=${{ env.PLUGIN_DIR }}/coverage.xml --coverage-text
-
-      - name: Upload logs as artifacts
-        uses: actions/upload-artifact@v4
+      - name: Check out the plugin
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          name: mautic-logs-php${{ matrix.php-versions }}-${{ matrix.db-types }}-mautic${{ matrix.mautic-versions }}
-          path: var/logs/
+          path: ${{ env.PLUGIN_DIR }}
+          persist-credentials: false
+
+      - name: Set up Mautic
+        uses: ./plugins/HousekeepingBundle/.github/actions/setup-mautic
+
+      - name: Code style (PHP-CS-Fixer)
+        run: php bin/php-cs-fixer fix --config "${PLUGIN_DIR}/.php-cs-fixer.php" --dry-run --diff
+
+      - name: PHPStan
+        env:
+          DB_PORT: ${{ job.services.database.ports['3306'] }}
+          APP_DEBUG: '1'
+        run: |
+          php bin/console cache:warmup --env=test
+          php bin/phpstan analyse -c "${PLUGIN_DIR}/phpstan.neon" --no-progress
