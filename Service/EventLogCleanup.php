@@ -979,7 +979,7 @@ class EventLogCleanup
 
     /**
      * Adds the conditions of the anonymous contacts cleanup that come from the database.
-     * Every unique identifier field, email included, must be empty, so a contact that has any value that could identify it stays.
+     * Every unique identifier field, email included, must be empty, so a contact that has any value that could identify it stays, even one of only spaces.
      * No table whose foreign key to leads does not cascade may point at the contact, so a contact with a page hit, a send or a form submission stays.
      * Those tables are kept, so each batch can check them again.
      * Rejects an identifier field with no column in leads, and a foreign key that does not come through one column on the contact's id.
@@ -1004,7 +1004,7 @@ class EventLogCleanup
                 throw new \RuntimeException('Cannot tell anonymous contacts apart, because the identifier field '.$field.' has no column in '.$table.'.');
             }
 
-            $this->queriesTemplate[self::ANONYMOUS_CONTACTS] .= ' AND ('.$column.$field.' IS NULL OR CAST('.$column.$field." AS CHAR) = '')";
+            $this->queriesTemplate[self::ANONYMOUS_CONTACTS] .= ' AND ('.$column.$field.' IS NULL OR OCTET_LENGTH(CAST('.$column.$field.' AS CHAR)) = 0)';
         }
 
         foreach ($this->readForeignKeys($table) as $key) {

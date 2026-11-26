@@ -17,6 +17,9 @@ final class EventLogCleanupTest extends TestCase
     private const COLUMNS_SQL = "SELECT CONCAT_WS(' ', COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, CHARACTER_SET_NAME, COLLATION_NAME) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table ORDER BY ORDINAL_POSITION";
     private const KEYS_SQL    = 'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column, r.DELETE_RULE AS delete_rule, k.CONSTRAINT_SCHEMA = DATABASE() AS same_schema FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.REFERENCED_TABLE_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table ORDER BY k.TABLE_NAME, k.COLUMN_NAME';
 
+    private const CONTACT_COLUMNS_SQL   = 'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table';
+    private const IDENTIFIER_FIELDS_SQL = "SELECT alias FROM prefix_table_lead_fields WHERE object = 'lead' AND is_unique_identifer = 1";
+
     /**
      * @dataProvider runProvider
      *
@@ -1013,6 +1016,26 @@ final class EventLogCleanupTest extends TestCase
     }
 
     /**
+     * Counts as anonymous only the contacts whose every identifier field is NULL or empty, so a value of only spaces keeps the contact.
+     */
+    public function testAnonymousContactsCountOnlyEmptyIdentifiersAsEmpty(): void
+    {
+        $keysTypes  = ['table' => \PDO::PARAM_STR];
+        $connection = $this->createArchiveConnection([
+            [self::CONTACT_COLUMNS_SQL, ['table' => 'prefix_table_leads'], $keysTypes, ['id', 'email', 'phone']],
+            [self::IDENTIFIER_FIELDS_SQL, [], [], ['phone']],
+            [self::KEYS_SQL, ['table' => 'prefix_table_leads'], $keysTypes, []],
+            ['SELECT COUNT(1) as cnt FROM prefix_table_leads WHERE prefix_table_leads.date_identified IS NULL AND prefix_table_leads.last_active IS NULL AND prefix_table_leads.date_added < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND (prefix_table_leads.email IS NULL OR OCTET_LENGTH(CAST(prefix_table_leads.email AS CHAR)) = 0) AND (prefix_table_leads.phone IS NULL OR OCTET_LENGTH(CAST(prefix_table_leads.phone AS CHAR)) = 0)', ['daysOld' => 30], ['daysOld' => \PDO::PARAM_INT], 3],
+            [self::KEYS_SQL, ['table' => 'prefix_table_leads'], $keysTypes, []],
+        ], 1, 1, 0);
+
+        $this->assertSame(
+            '3 leads rows would have been deleted. This is a dry run.',
+            $this->createEventLogCleanup($connection)->deleteEventLogEntries(30, null, true, [EventLogCleanup::ANONYMOUS_CONTACTS => true], $this->createStub(OutputInterface::class))
+        );
+    }
+
+    /**
      * Returns a connection that expects these queries in this order and answers each with the value given for it.
      *
      * @param list<array{0: string, 1: array<string, mixed>, 2: array<string, int>, 3: mixed}> $calls
@@ -1040,7 +1063,7 @@ final class EventLogCleanupTest extends TestCase
                     $result->method('fetchNumeric')->willReturn($call[3]);
                 } elseif (str_contains($sql, 'KEY_COLUMN_USAGE')) {
                     $result->method('fetchAllAssociative')->willReturn($call[3]);
-                } elseif (str_contains($sql, 'COUNT(*)')) {
+                } elseif (str_contains($sql, 'COUNT(*)') || str_contains($sql, 'COUNT(1)')) {
                     $result->method('fetchOne')->willReturn($call[3]);
                 } elseif (is_array($call[3])) {
                     $result->method('fetchFirstColumn')->willReturn($call[3]);

@@ -56,6 +56,39 @@ final class AnonymousContactsCommandTest extends MauticMysqlTestCase
         $this->assertSame(0, $commandTester->getStatusCode());
     }
 
+    /**
+     * Keeps a contact whose email holds only a space on a connection whose collation pads spaces, and deletes one whose email is empty.
+     */
+    public function testKeepsAContactWhoseIdentifierHoldsOnlySpaces(): void
+    {
+        $this->fixtureHelper->enablePlugin();
+
+        $connection = $this->em->getConnection();
+        $connection->executeStatement('SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci');
+        $this->assertSame('utf8mb4_unicode_ci', $connection->fetchOne('SELECT @@collation_connection'));
+
+        $spaces   = $this->fixtureHelper->createAnonymousContact($this->fixtureHelper->daysAgo(400));
+        $empty    = $this->fixtureHelper->createAnonymousContact($this->fixtureHelper->daysAgo(400));
+        $spacesId = (int) $spaces->getId();
+        $emptyId  = (int) $empty->getId();
+
+        $connection->executeStatement('UPDATE '.MAUTIC_TABLE_PREFIX.'leads SET email = ? WHERE id = ?', [' ', $spacesId]);
+        $connection->executeStatement('UPDATE '.MAUTIC_TABLE_PREFIX.'leads SET email = ? WHERE id = ?', ['', $emptyId]);
+
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
+            '--days-old'           => 30,
+            '--anonymous-contacts' => true,
+            '--batch-size'         => 1,
+        ]);
+
+        $this->em->clear();
+
+        $this->assertNotNull($this->em->getRepository(Lead::class)->find($spacesId));
+        $this->assertNull($this->em->getRepository(Lead::class)->find($emptyId));
+        $this->assertStringContainsString('1 leads rows have been deleted.', $commandTester->getDisplay());
+        $this->assertSame(0, $commandTester->getStatusCode());
+    }
+
     public function testDeletesOnlyAnonymousContactsThatWereNeverActive(): void
     {
         $this->fixtureHelper->enablePlugin();

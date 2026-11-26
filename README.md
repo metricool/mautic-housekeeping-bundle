@@ -125,7 +125,7 @@ Mautic's own `mautic:maintenance:cleanup` deletes anonymous contacts by their la
 `--anonymous-contacts` deletes the contacts that:
 - were never identified (`date_identified` is empty) and were never active (`last_active` is empty),
 - were added more than `--days-old` days ago (a contact with no `date_added` stays),
-- have every unique identifier field empty, `email` included. The fields are read from `lead_fields` when the run starts, so an identifier field you added counts too,
+- have every unique identifier field empty, `email` included. A value of only spaces counts as a value. The fields are read from `lead_fields` when the run starts, so an identifier field you added counts too,
 - have no row in a table whose foreign key to `leads` does not cascade, such as `page_hits`, `email_stats` or `form_submissions`. Such a row means the contact did something. These tables are read from the database when the run starts.
 
 How a run works:
