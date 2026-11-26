@@ -1,0 +1,43 @@
+parameters:
+	level: 6
+	paths:
+		- .
+	excludePaths:
+		- vendor (?)
+	tmpDir: ../../var/phpstan-cache/housekeeping
+	bootstrapFiles:
+		- ../../phpstan-bootstrap.php
+	dynamicConstantNames:
+		- MAUTIC_ENV
+		- MAUTIC_TABLE_PREFIX
+		- MAUTIC_VERSION
+	type_coverage:
+		return: 100
+		param: 100
+		property: 100
+		constant: 0
+	doctrine:
+		objectManagerLoader: ../../tests/object-manager.php
+		allowNullablePropertyForRequiredField: true
+	symfony:
+		containerXmlPath: ../../var/cache/test/AppKernelTestDebugContainer.xml
+		consoleApplicationLoader: ../../app/console-application.php
+	ignoreErrors:
+		-
+			identifier: symplify.classNameRespectsParentSuffix
+			reportUnmatched: false
+		-
+			identifier: symplify.requireExceptionNamespace
+			reportUnmatched: false
+		-
+			identifier: symplify.noReference
+			reportUnmatched: false
+		-
+			identifier: symplify.explicitInterfaceSuffixName
+			reportUnmatched: false
+		-
+			identifier: symplify.requiredInterfaceContractNamespace
+			reportUnmatched: false
+		-
+			identifier: doctrine.noGetRepositoryOutsideService
+			reportUnmatched: false

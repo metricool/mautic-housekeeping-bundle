@@ -6,7 +6,6 @@ namespace MauticPlugin\HousekeepingBundle\Tests\Functional;
 
 use Mautic\CoreBundle\Test\MauticMysqlTestCase;
 use Mautic\EmailBundle\Entity\Stat;
-use Mautic\EmailBundle\Model\EmailModel;
 use MauticPlugin\HousekeepingBundle\Tests\Fixtures\FixtureHelper;
 
 final class EmailStatTokensDefaultTest extends MauticMysqlTestCase
@@ -22,9 +21,7 @@ final class EmailStatTokensDefaultTest extends MauticMysqlTestCase
         $email   = $fixtureHelper->createEmail('Default Tokens Email');
         $stat    = $fixtureHelper->createEmailStat($contact, $email, new \DateTime(), ['{subject}' => 'Hello']);
 
-        $model = static::getContainer()->get('mautic.email.model.email');
-        \assert($model instanceof EmailModel);
-        $model->saveEmailStat($stat);
+        static::getContainer()->get('mautic.email.model.email')->saveEmailStat($stat);
 
         $this->em->clear();
 
