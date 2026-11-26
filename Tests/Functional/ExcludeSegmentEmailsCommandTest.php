@@ -43,7 +43,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
         $segment->setIsPublished(false);
         $this->em->flush();
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--exclude-segment-emails' => null,
@@ -78,7 +78,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
             'filter'   => [(string) $named->getId()],
         ]]);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--exclude-segment-emails' => null,
@@ -103,7 +103,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
 
         $this->fixtureHelper->createSegment('segment-bar', [$this->filter('lead_email_sent', $first->getId().'|'.$second->getId())]);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--exclude-segment-emails' => null,
@@ -132,7 +132,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
             $this->filter('other_plugin_field', [(string) $unlisted->getId()]),
         ]);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--page-hits'              => true,
             '--exclude-segment-emails' => 'plugin_email_clicked',
@@ -160,7 +160,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
 
         $this->fixtureHelper->createSegment('segment-merge', [$this->filter('lead_email_sent', [(string) $named->getId()])]);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--exclude-emails'         => (string) $excluded->getId(),
@@ -188,7 +188,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
 
         $this->fixtureHelper->createSegment('segment-family-filter', [$this->filter('lead_email_received', [(string) $parent->getId()])]);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--unlink-segments'        => true,
@@ -221,7 +221,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
 
         $this->fixtureHelper->createSegment('segment-unrelated', [$this->filter('city', 'Berlin', '=')]);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--exclude-segment-emails' => null,
@@ -254,7 +254,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
             ],
         ]]);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--exclude-segment-emails' => null,
@@ -280,7 +280,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
             'properties' => ['filter' => [(string) $email->getId()]],
         ]]);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--exclude-segment-emails' => null,
@@ -302,7 +302,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
         $stat    = $this->fixtureHelper->createEmailStat($contact, $email, $this->fixtureHelper->daysAgo(400));
         $segment = $this->fixtureHelper->createSegment('segment-bad-value', [$this->filter('lead_email_received', ['first-email'])]);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--exclude-segment-emails' => null,
@@ -324,7 +324,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
         $stat    = $this->fixtureHelper->createEmailStat($contact, $email, $this->fixtureHelper->daysAgo(400));
         $segment = $this->fixtureHelper->createSegment('segment-empty-field', [$this->filter(' ', [(string) $email->getId()])]);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--exclude-segment-emails' => null,
@@ -348,7 +348,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
 
         $this->em->getConnection()->update(MAUTIC_TABLE_PREFIX.'lead_lists', ['filters' => 'not serialized'], ['id' => (int) $segment->getId()]);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'               => 30,
             '--email-stats'            => true,
             '--exclude-segment-emails' => null,
@@ -363,7 +363,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
 
     public function testNeedsAnOperationThatTakesExcludedEmails(): void
     {
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--lead'                   => true,
             '--exclude-segment-emails' => null,
         ]);
@@ -374,7 +374,7 @@ final class ExcludeSegmentEmailsCommandTest extends MauticMysqlTestCase
 
     public function testRejectsAFieldNameWithOtherCharacters(): void
     {
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--email-stats'            => true,
             '--exclude-segment-emails' => 'plugin_email_clicked,email clicked',
         ]);

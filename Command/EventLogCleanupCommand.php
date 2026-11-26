@@ -12,7 +12,7 @@ use Symfony\Component\Console\Input\InputOption;
 use Symfony\Component\Console\Output\OutputInterface;
 
 #[AsCommand(
-    name: 'leuchtfeuer:housekeeping',
+    name: 'mautic:housekeeping',
     description: 'Database Cleanup Command to delete lead_event_log table entries, campaign_lead_event_log table entries, email_stats table entries where the referenced email entry is currently not published and email_stats_devices table entries.',
 )]
 class EventLogCleanupCommand extends Command
@@ -45,7 +45,7 @@ class EventLogCleanupCommand extends Command
                     new InputOption('lead-object', null, InputOption::VALUE_REQUIRED, 'Comma-separated list of lead_event_log objects to purge (e.g., segment,import). All other objects are kept. Implies --lead.'),
                     new InputOption('page-hits', 'p', InputOption::VALUE_NONE, 'Purge only Hit (page_hit) Records'),
                     new InputOption('email-stats', 'm', InputOption::VALUE_NONE, 'Purge only Email Stats Records where the referenced email entry is currently not published and purge Email Stats Devices. Important: If referenced email is ever switched back to published, the contacts will get the email again. Add --unlink-segments to stop that.'),
-                    new InputOption('email-stats-tokens', 't', InputOption::VALUE_NONE, 'Set only tokens fields in Email Stats Records to NULL. Important: This option can not be combined with any "-c", "-l" or "-m" flag in one command. And: If the option flag "-t" is not set, the NULL setting of tokens will not be done with the basis command, so if you just run mautic:leuchtfeuer:housekeeping without a flag)'),
+                    new InputOption('email-stats-tokens', 't', InputOption::VALUE_NONE, 'Set only tokens fields in Email Stats Records to NULL. Important: This option can not be combined with any "-c", "-l" or "-m" flag in one command. And: If the option flag "-t" is not set, the NULL setting of tokens will not be done with the basis command, so if you just run mautic:housekeeping without a flag)'),
                     new InputOption('cmp-id', 'i', InputOption::VALUE_OPTIONAL, 'Delete only campaign_lead_eventLog for a specific CampaignID. Implies --campaign-lead.', 'none'),
                     new InputOption('exclude-emails', null, InputOption::VALUE_REQUIRED, 'Comma-separated list of email IDs to exclude from deletion (e.g., 1,44,61). Works with --email-stats, --email-stats-tokens and --page-hits.'),
                     new InputOption('exclude-segment-emails', null, InputOption::VALUE_OPTIONAL, 'Also exclude every email that a segment filter names, so deleting its rows cannot change who is in the segment. The filters of every segment, published or not, are read once when the run starts. Reads the '.implode(' and ', EventLogCleanup::SEGMENT_EMAIL_FIELDS).' filters, and also the filter fields you list, comma-separated, whose values are email IDs, such as one a plugin adds. If a filter cannot be read, the run stops before it deletes anything. Works with --email-stats, --email-stats-tokens and --page-hits.', false),

@@ -33,7 +33,7 @@ final class LeadObjectFilterCommandTest extends MauticMysqlTestCase
         $importLog = $this->fixtureHelper->createLeadEventLog($contact, $oldDate, 'lead', 'import');
         $recentLog = $this->fixtureHelper->createLeadEventLog($contact, $this->fixtureHelper->daysAgo(10), 'lead', 'segment');
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'    => 30,
             '--lead-object' => 'segment',
         ]);
@@ -62,7 +62,7 @@ final class LeadObjectFilterCommandTest extends MauticMysqlTestCase
         $this->fixtureHelper->createLeadEventLog($contact, $oldDate, 'lead', 'import');
         $keptLog = $this->fixtureHelper->createLeadEventLog($contact, $oldDate, 'campaign', 'action');
 
-        $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'    => 30,
             '--lead-object' => 'segment, import',
         ]);
@@ -84,7 +84,7 @@ final class LeadObjectFilterCommandTest extends MauticMysqlTestCase
         $this->fixtureHelper->createLeadEventLog($contact, $oldDate, 'lead', 'segment');
         $this->fixtureHelper->createPageHit($contact, $oldDate);
 
-        $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'    => 30,
             '--lead-object' => 'segment',
         ]);
@@ -105,7 +105,7 @@ final class LeadObjectFilterCommandTest extends MauticMysqlTestCase
         $this->fixtureHelper->createLeadEventLog($contact, $oldDate, 'lead', 'segment');
         $this->fixtureHelper->createLeadEventLog($contact, $oldDate, 'lead', 'import');
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'    => 30,
             '--lead-object' => 'segment',
             '--dry-run'     => true,
@@ -125,7 +125,7 @@ final class LeadObjectFilterCommandTest extends MauticMysqlTestCase
         $contact = $this->fixtureHelper->createContact('lead-object-empty@test.com');
         $this->fixtureHelper->createLeadEventLog($contact, $this->fixtureHelper->daysAgo(400), 'lead', 'segment');
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'    => 30,
             '--lead-object' => ' , ',
         ]);

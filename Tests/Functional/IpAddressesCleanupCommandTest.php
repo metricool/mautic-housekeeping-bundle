@@ -41,7 +41,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
         $unused = $this->fixtureHelper->createIpAddress('192.0.2.11');
         $this->keepNewestPast();
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--ip-addresses' => true,
             '--batch-size'   => 10,
         ]);
@@ -64,7 +64,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
         $unusedId = (int) $this->fixtureHelper->createIpAddress('192.0.2.12')->getId();
         $upper    = $this->maxAddressId() - EventLogCleanup::IP_KEEP_NEWEST;
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--ip-addresses' => true,
             '--batch-size'   => 10,
         ]);
@@ -92,7 +92,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
             $hitIp   = (int) $hit->getIpAddress()->getId();
             $unused  = $this->fixtureHelper->createIpAddress('192.0.2.13');
 
-            $archiveRun = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            $archiveRun = $this->testSymfonyCommand('mautic:housekeeping', [
                 '--days-old'   => 30,
                 '--page-hits'  => true,
                 '--batch-size' => 1,
@@ -103,7 +103,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
 
             $this->keepNewestPast();
 
-            $ipRun = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            $ipRun = $this->testSymfonyCommand('mautic:housekeeping', [
                 '--ip-addresses' => true,
                 '--batch-size'   => 10,
             ]);
@@ -149,7 +149,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
             $connection->insert($table, ['ip_id' => $used->getId()]);
             $this->keepNewestPast();
 
-            $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
                 '--ip-addresses' => true,
                 '--batch-size'   => 10,
             ]);
@@ -178,7 +178,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
             $unused = $this->fixtureHelper->createIpAddress('192.0.2.16');
             $this->keepNewestPast();
 
-            $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
                 '--ip-addresses' => true,
                 '--batch-size'   => 10,
             ]);
@@ -207,7 +207,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
             $other->beginTransaction();
             $other->insert(MAUTIC_TABLE_PREFIX.'lead_ips_xref', ['lead_id' => $contact->getId(), 'ip_id' => $live->getId()]);
 
-            $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
                 '--ip-addresses' => true,
                 '--batch-size'   => 10,
             ]);
@@ -239,7 +239,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
         $this->fixtureHelper->createIpAddressWithId($second, '192.0.2.2');
         $this->keepNewestPast();
 
-        $firstRun = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $firstRun = $this->testSymfonyCommand('mautic:housekeeping', [
             '--ip-addresses' => true,
             '--ip-slice'     => $slice.'/2',
             '--batch-size'   => 10,
@@ -249,7 +249,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
         $this->assertTrue($this->addressExists($second));
         $this->assertStringContainsString('checked slice '.$slice.' of 2 of the IDs', $firstRun->getDisplay());
 
-        $secondRun = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $secondRun = $this->testSymfonyCommand('mautic:housekeeping', [
             '--ip-addresses' => true,
             '--ip-slice'     => (3 - $slice).'/2',
             '--batch-size'   => 10,
@@ -267,7 +267,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
         $unused = $this->fixtureHelper->createIpAddress('192.0.2.19');
         $this->keepNewestPast();
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--ip-addresses' => true,
             '--dry-run'      => true,
             '--batch-size'   => 10,
@@ -291,7 +291,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
             $this->keepNewestPast();
 
             $before        = $this->addressIds();
-            $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+            $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
                 '--ip-addresses' => true,
                 '--batch-size'   => 10,
                 '--archive'      => true,
@@ -318,7 +318,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
         $third  = $this->fixtureHelper->createIpAddress('192.0.2.24');
         $this->keepNewestPast();
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--ip-addresses' => true,
             '--batch-size'   => 5,
             '--max-rows'     => 2,
@@ -341,7 +341,7 @@ final class IpAddressesCleanupCommandTest extends MauticMysqlTestCase
         $unused = $this->fixtureHelper->createIpAddress('192.0.2.25');
         $this->keepNewestPast();
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping');
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping');
 
         $this->assertTrue($this->addressExists((int) $unused->getId()));
         $this->assertStringNotContainsString('ip_addresses', $commandTester->getDisplay());

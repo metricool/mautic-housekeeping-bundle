@@ -41,7 +41,7 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $this->fixtureHelper->createPageHit($contact, $oldDate);
         $recentHit = $this->fixtureHelper->createPageHit($contact, $this->fixtureHelper->daysAgo(10));
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'       => 30,
             '--page-hits'      => true,
             '--exclude-emails' => (string) $excludedEmail->getId(),
@@ -72,7 +72,7 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $recentHit   = $this->fixtureHelper->createPageHit($contact, $this->fixtureHelper->daysAgo(10));
         $laterOldHit = $this->fixtureHelper->createPageHit($contact, $oldDate);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'   => 30,
             '--page-hits'  => true,
             '--batch-size' => 1,
@@ -103,7 +103,7 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $leftHit   = $this->fixtureHelper->createPageHit($contact, $oldDate);
         $recentHit = $this->fixtureHelper->createPageHit($contact, $this->fixtureHelper->daysAgo(10));
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'   => 30,
             '--page-hits'  => true,
             '--batch-size' => 5,
@@ -138,7 +138,7 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $oldDevice    = $this->fixtureHelper->createEmailStatDevice($closedStat, $oldDate);
         $recentDevice = $this->fixtureHelper->createEmailStatDevice($closedStat, $this->fixtureHelper->daysAgo(10));
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'    => 30,
             '--email-stats' => true,
             '--batch-size'  => 1,
@@ -172,7 +172,7 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $this->fixtureHelper->createLeadEventLog($contact, $oldDate, 'lead', 'segment');
         $recentLog = $this->fixtureHelper->createLeadEventLog($contact, $this->fixtureHelper->daysAgo(10), 'lead', 'segment');
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'    => 30,
             '--lead-object' => 'segment',
             '--batch-size'  => 1,
@@ -211,7 +211,7 @@ final class BatchedCleanupCommandTest extends MauticMysqlTestCase
         $this->fixtureHelper->createEmailStatDevice($excludedStat, $oldDate);
         $this->fixtureHelper->createEmailStatDevice($closedStat, $oldDate);
 
-        $commandTester = $this->testSymfonyCommand('leuchtfeuer:housekeeping', [
+        $commandTester = $this->testSymfonyCommand('mautic:housekeeping', [
             '--days-old'       => 30,
             '--email-stats'    => true,
             '--exclude-emails' => (string) $excludedEmail->getId(),
