@@ -553,7 +553,7 @@ class EventLogCleanup
         }
 
         if ([] !== $this->belowRows) {
-            $message .= ' '.$this->generateMessage($this->belowRows, ' rows point at those rows, so a run with --archive would stop, and a run without it would remove or change them.');
+            $message .= ' '.$this->generateMessage($this->belowRows, ' rows point at those rows, so a run with --archive would stop, and a run without it would remove or change them, or stop where their key blocks the delete.');
         }
 
         if ($dryRun) {
@@ -1062,7 +1062,7 @@ class EventLogCleanup
     /**
      * Counts, on a dry run, the rows that the cascade would remove with the anonymous contacts, for each child table that has some.
      * It also counts, for each table one level further down, the rows that point at those child rows, each row once.
-     * A run with the archive stops on such a row, and a run without it removes or changes it.
+     * A run with the archive stops on such a row, and a run without it removes or changes it, or stops where its key blocks the delete.
      */
     private function countContactCascades(): void
     {
