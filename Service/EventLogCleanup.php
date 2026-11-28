@@ -30,6 +30,7 @@ class EventLogCleanup
     public const PAGE_HITS            = 'page_hits';
     public const ARCHIVE_PREFIX       = 'housekeeping_archive_';
     public const EMAIL_LIST_XREF      = 'email_list_xref';
+    public const ANONYMOUS_CONTACTS   = 'leads';
     public const SEGMENT_EMAIL_FIELDS = ['lead_email_received', 'lead_email_sent'];
     private const ID_RANGE_TYPES      = ['fromId' => \PDO::PARAM_INT, 'toId' => \PDO::PARAM_INT];
     private const MAX_ID_SPAN         = 50000;
@@ -85,6 +86,7 @@ class EventLogCleanup
         self::EMAIL_STATS_TOKENS   => self::PREFIX.'email_stats '.self::SET.' WHERE date_sent < DATE_SUB(NOW(),INTERVAL :daysOld DAY) AND tokens IS NOT NULL',
         self::EMAIL_STATS_DEVICES  => self::PREFIX.'email_stats_devices WHERE '.self::PREFIX.'email_stats_devices.date_opened < DATE_SUB(NOW(),INTERVAL :daysOld DAY)',
         self::PAGE_HITS            => self::PREFIX.'page_hits WHERE date_hit < DATE_SUB(NOW(),INTERVAL :daysOld DAY)',
+        self::ANONYMOUS_CONTACTS   => self::PREFIX.'leads WHERE '.self::PREFIX.'leads.date_identified IS NULL AND '.self::PREFIX.'leads.last_active IS NULL AND '.self::PREFIX.'leads.date_added < DATE_SUB(NOW(),INTERVAL :daysOld DAY)',
     ];
 
     /**
@@ -116,6 +118,9 @@ class EventLogCleanup
         self::PAGE_HITS            => [
             'daysOld' => self::DEFAULT_DAYS,
         ],
+        self::ANONYMOUS_CONTACTS   => [
+            'daysOld' => self::DEFAULT_DAYS,
+        ],
     ];
 
     /**
@@ -138,6 +143,9 @@ class EventLogCleanup
             'daysOld' => \PDO::PARAM_INT,
         ],
         self::PAGE_HITS            => [
+            'daysOld' => \PDO::PARAM_INT,
+        ],
+        self::ANONYMOUS_CONTACTS   => [
             'daysOld' => \PDO::PARAM_INT,
         ],
     ];
@@ -181,6 +189,27 @@ class EventLogCleanup
      * @var array<int, true>
      */
     private array $unlinkedEmails = [];
+
+    /**
+     * The tables whose foreign key to leads does not cascade, which must have no row for the contacts of a batch.
+     *
+     * @var list<array{table: string, column: string}>
+     */
+    private array $contactGuards = [];
+
+    /**
+     * The rows that the cascade of the anonymous contacts cleanup removed, or would remove on a dry run, for each table without the prefix.
+     *
+     * @var array<string, int>
+     */
+    private array $cascadeRows = [];
+
+    /**
+     * The rows that point at rows the cascade of the anonymous contacts cleanup would remove, for each table without the prefix, counted on a dry run.
+     *
+     * @var array<string, int>
+     */
+    private array $belowRows = [];
 
     /**
      * @var array<string, string>
@@ -307,6 +336,7 @@ class EventLogCleanup
      * With $archive, each batch copies its rows, and the child rows a cascade removes with them, to housekeeping_archive_ tables in the same transaction as the write.
      * Both need $batchSize, and a dry run ignores them.
      * The ip_addresses cleanup runs last, outside the transactions of the other operations, and needs $batchSize outside a dry run.
+     * The anonymous contacts cleanup needs $batchSize outside a dry run too, and its rows are counted as contacts, without the rows its cascade removes.
      *
      * @param non-empty-array<string, bool> $operations
      * @param list<int>|null                $excludeEmailIds
@@ -394,6 +424,19 @@ class EventLogCleanup
             $this->prepareSegmentUnlink($dryRun, $excludeEmailIds);
         }
 
+        $anonymousContacts   = (bool) ($operations[self::ANONYMOUS_CONTACTS] ?? false);
+        $this->contactGuards = [];
+        $this->cascadeRows   = [];
+        $this->belowRows     = [];
+
+        if ($anonymousContacts) {
+            if (!$dryRun && null === $batchSize) {
+                throw new \InvalidArgumentException('The anonymous contacts cleanup needs a batch size.');
+            }
+
+            $this->prepareAnonymousContacts();
+        }
+
         $result = [
             self::CAMPAIGN_LEAD_EVENTS => 0,
             self::LEAD_EVENTS          => 0,
@@ -401,6 +444,7 @@ class EventLogCleanup
             self::EMAIL_STATS_TOKENS   => 0,
             self::EMAIL_STATS_DEVICES  => 0,
             self::PAGE_HITS            => 0,
+            self::ANONYMOUS_CONTACTS   => 0,
         ];
 
         $useSingleTransaction = ($dryRun || null === $batchSize) && in_array(true, $operations, true);
@@ -428,6 +472,10 @@ class EventLogCleanup
 
                 if ($output->isVerbose()) {
                     $output->writeln($sql);
+                }
+
+                if (self::ANONYMOUS_CONTACTS === $operation) {
+                    $this->countContactCascades();
                 }
             }
         } elseif (null !== $batchSize) {
@@ -498,6 +546,14 @@ class EventLogCleanup
 
         if ($unlinkSegments) {
             $message .= $this->segmentMessage($dryRun);
+        }
+
+        if ([] !== $this->cascadeRows) {
+            $message .= ' With the contacts, the cascade '.($dryRun ? 'would remove ' : 'removed ').$this->generateMessage($this->cascadeRows, ' rows.');
+        }
+
+        if ([] !== $this->belowRows) {
+            $message .= ' '.$this->generateMessage($this->belowRows, ' rows point at those rows, so a run with --archive would stop, and a run without it would remove or change them, or stop where their key blocks the delete.');
         }
 
         if ($dryRun) {
@@ -661,23 +717,32 @@ class EventLogCleanup
      * Creates the archive tables an operation needs, and returns the statements each batch uses to copy its rows.
      * A delete also copies the rows of each child table that a foreign key cascade empties with it.
      * The ip_addresses cleanup has no child rows to copy, because it deletes only addresses that no table uses, so no foreign key acts on its delete.
+     * The anonymous contacts cleanup accepts a child table that further tables point at, because each batch checks that those tables have no row for it.
      * The archive tables are made with CREATE TABLE ... SELECT, so they have the same columns as their source, with no keys, and generated columns become plain ones.
      * Rows are copied by column position, so an archive table whose columns differ from its source in name, order, type, size, nullability,
      * character set or collation is rejected. Without strict SQL mode a narrower column would cut values with only a warning.
      *
-     * @return array{copy: string, children: list<array{table: string, source: string, column: string}>}
+     * @return array{copy: string, children: list<array{table: string, source: string, column: string, below: list<array{table: string, column: string, referenced: string}>}>}
      */
     private function prepareArchive(string $operation, string $table, string $rows): array
     {
         $children = [];
 
         if (!array_key_exists($operation, $this->update) && self::IP_ADDRESSES !== $operation) {
-            foreach ($this->findCascadeChildren($table) as $child => $column) {
-                if ([] !== $this->findCascadeChildren($child)) {
+            $guarded = self::ANONYMOUS_CONTACTS === $operation;
+
+            foreach ($this->findCascadeChildren($table, $guarded) as $child => $column) {
+                $below = [];
+
+                if ($guarded) {
+                    foreach ($this->readForeignKeys($child) as $key) {
+                        $below[] = ['table' => $key['child_table'], 'column' => $key['child_column'], 'referenced' => $key['referenced_column']];
+                    }
+                } elseif ([] !== $this->findCascadeChildren($child)) {
                     throw new \RuntimeException('Cannot archive '.$table.', because a delete there cascades from '.$child.' to further tables.');
                 }
 
-                $children[] = ['table' => $this->archiveTableName(substr($child, strlen($this->dbPrefix))), 'source' => $child, 'column' => $column];
+                $children[] = ['table' => $this->archiveTableName(substr($child, strlen($this->dbPrefix))), 'source' => $child, 'column' => $column, 'below' => $below];
             }
         }
 
@@ -699,35 +764,64 @@ class EventLogCleanup
 
     /**
      * Lists the child tables whose rows a delete on this table removes through a foreign key cascade, each with its column that points here.
-     * Rejects a table that a delete would change through SET NULL or SET DEFAULT, because a copy of the deleted rows could not undo that.
+     * Rejects a table that a delete would change through SET NULL or SET DEFAULT, because a copy of the deleted rows could not undo that,
+     * unless $guarded says the rows to delete never have such child rows.
      * Rejects a cascade that does not come through one single-column key on the parent's id, because the copy finds the child rows by that key.
      *
-     * @return array<string, string>
+     * @param string $table   the table rows are deleted from, with its prefix
+     * @param bool   $guarded true when the conditions of the delete leave out every row that a SET NULL or SET DEFAULT child points at
+     *
+     * @return array<string, string> each child table, with its prefix, and its column that points here
      */
-    private function findCascadeChildren(string $table): array
+    private function findCascadeChildren(string $table, bool $guarded = false): array
     {
         $children = [];
-        $keys     = $this->connection->executeQuery(
-            'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column, r.DELETE_RULE AS delete_rule FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.CONSTRAINT_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table',
+
+        foreach ($this->readForeignKeys($table) as $key) {
+            if (!$guarded && in_array($key['delete_rule'], ['SET NULL', 'SET DEFAULT'], true)) {
+                throw new \RuntimeException('Cannot archive '.$table.', because a delete there changes '.$key['child_table'].' through '.$key['delete_rule'].'.');
+            }
+
+            if ('CASCADE' === $key['delete_rule']) {
+                if ('id' !== $key['referenced_column'] || array_key_exists($key['child_table'], $children)) {
+                    throw new \RuntimeException('Cannot archive '.$table.', because the cascade to '.$key['child_table'].' does not come through one key on its id.');
+                }
+
+                $children[$key['child_table']] = $key['child_column'];
+            }
+        }
+
+        return $children;
+    }
+
+    /**
+     * Reads every foreign key that points at a table of this database, one row per column, ordered by the table and column that point.
+     * Rejects a key that comes from a table in another database, because a copy, a count or a check here could not reach it.
+     *
+     * @param string $table the table pointed at, with its prefix
+     *
+     * @return list<array{child_table: string, child_column: string, referenced_column: string, delete_rule: string}> each key's table and column, the column it points at, and what a delete does to it
+     */
+    private function readForeignKeys(string $table): array
+    {
+        $keys = $this->connection->executeQuery(
+            'SELECT k.TABLE_NAME AS child_table, k.COLUMN_NAME AS child_column, k.REFERENCED_COLUMN_NAME AS referenced_column, r.DELETE_RULE AS delete_rule, k.CONSTRAINT_SCHEMA = DATABASE() AS same_schema FROM information_schema.KEY_COLUMN_USAGE k JOIN information_schema.REFERENTIAL_CONSTRAINTS r ON r.CONSTRAINT_SCHEMA = k.CONSTRAINT_SCHEMA AND r.CONSTRAINT_NAME = k.CONSTRAINT_NAME AND r.TABLE_NAME = k.TABLE_NAME WHERE k.REFERENCED_TABLE_SCHEMA = DATABASE() AND k.REFERENCED_TABLE_NAME = :table ORDER BY k.TABLE_NAME, k.COLUMN_NAME',
             ['table' => $table],
             ['table' => \PDO::PARAM_STR]
         )->fetchAllAssociative();
 
         foreach ($keys as $key) {
-            if (in_array($key['delete_rule'], ['SET NULL', 'SET DEFAULT'], true)) {
-                throw new \RuntimeException('Cannot archive '.$table.', because a delete there changes '.$key['child_table'].' through '.$key['delete_rule'].'.');
-            }
-
-            if ('CASCADE' === $key['delete_rule']) {
-                if ('id' !== $key['referenced_column'] || array_key_exists((string) $key['child_table'], $children)) {
-                    throw new \RuntimeException('Cannot archive '.$table.', because the cascade to '.$key['child_table'].' does not come through one key on its id.');
-                }
-
-                $children[(string) $key['child_table']] = (string) $key['child_column'];
+            if (1 !== (int) $key['same_schema']) {
+                throw new \RuntimeException('Cannot work on '.$table.', because '.$key['child_table'].' in another database points at it.');
             }
         }
 
-        return $children;
+        return array_map(static fn (array $key): array => [
+            'child_table'       => (string) $key['child_table'],
+            'child_column'      => (string) $key['child_column'],
+            'referenced_column' => (string) $key['referenced_column'],
+            'delete_rule'       => (string) $key['delete_rule'],
+        ], $keys);
     }
 
     /**
@@ -750,12 +844,16 @@ class EventLogCleanup
      * the range ends at the last row the limit allows, so a row that started to match after the select cannot take the run past it.
      * With the segment unlink on, it locks the variant and translation families of the batch's emails. If one of them has to stay whole,
      * it rolls back and writes the same range again without that family's emails. Otherwise it removes their segments before anything else is written.
+     * The anonymous contacts cleanup runs each batch at READ COMMITTED, so it keeps locks only on the contacts it deletes, not on every contact its ID range scans.
+     * It checks that no table whose foreign key to leads does not cascade points at a locked contact.
+     * The contacts are locked first, so no such row can be added before the batch ends.
      * With the archive on it then locks and copies their child rows and copies the rows themselves.
+     * For the anonymous contacts cleanup it first checks that no table points at the locked child rows, because the delete would change those rows without a copy.
      * Every row stays locked from its copy to the write, whatever the isolation level, so the archive holds the values that were removed.
      * If the write or a copy counts differently from the rows locked, the batch is rolled back.
      *
-     * @param array{table: string, match: string, write: string, archive: array{copy: string, children: list<array{table: string, source: string, column: string}>}|null, emails: string|null} $statements
-     * @param array{fromId: int, toId: int}                                                                                                                                                    $range
+     * @param array{table: string, match: string, write: string, archive: array{copy: string, children: list<array{table: string, source: string, column: string, below: list<array{table: string, column: string, referenced: string}>}>}|null, emails: string|null} $statements
+     * @param array{fromId: int, toId: int}                                                                                                                                                                                                                           $range
      */
     private function writeBatch(string $operation, array $statements, array $range): int
     {
@@ -763,6 +861,11 @@ class EventLogCleanup
         $params     = $this->params[$operation] + $range;
         $types      = $this->types[$operation] + self::ID_RANGE_TYPES;
         $archive    = $statements['archive'];
+        $cascaded   = [];
+
+        if (self::ANONYMOUS_CONTACTS === $operation) {
+            $this->connection->executeStatement(self::IP_ISOLATION);
+        }
 
         $this->connection->beginTransaction();
         $familyKept = false;
@@ -782,17 +885,44 @@ class EventLogCleanup
             }
 
             if ([] !== $matchingIds && !$familyKept) {
+                foreach (self::ANONYMOUS_CONTACTS === $operation ? $this->contactGuards : [] as $guard) {
+                    $foundRows = (int) $this->connection->executeQuery(
+                        'SELECT COUNT(*) FROM '.$guard['table'].' WHERE '.$guard['column'].' IN (:batchIds)',
+                        ['batchIds' => $matchingIds],
+                        $batchTypes
+                    )->fetchOne();
+
+                    if (0 !== $foundRows) {
+                        throw new \RuntimeException('Contact check failed on '.$guard['table'].': '.$foundRows.' rows point at contacts of the batch. The batch was rolled back.');
+                    }
+                }
+
                 foreach (null === $archive ? [] : $archive['children'] as $child) {
                     $lockedRows = (int) $this->connection->executeQuery(
                         'SELECT COUNT(*) FROM '.$child['source'].' WHERE '.$child['column'].' IN (:batchIds) FOR UPDATE',
                         ['batchIds' => $matchingIds],
                         $batchTypes
                     )->fetchOne();
+
+                    foreach ($child['below'] as $below) {
+                        $foundRows = (int) $this->connection->executeQuery(
+                            'SELECT COUNT(*) FROM '.$below['table'].' WHERE '.$below['column'].' IN (SELECT '.$below['referenced'].' FROM '.$child['source'].' WHERE '.$child['column'].' IN (:batchIds))',
+                            ['batchIds' => $matchingIds],
+                            $batchTypes
+                        )->fetchOne();
+
+                        if (0 !== $foundRows) {
+                            throw new \RuntimeException('Archive check failed on '.$below['table'].': '.$foundRows.' rows point at '.$child['source'].' rows of the batch and would change without a copy. The batch was rolled back.');
+                        }
+                    }
+
                     $copiedRows = $this->copyRows($child['table'], $child['source'], $child['column'], $matchingIds);
 
                     if ($copiedRows !== $lockedRows) {
                         throw new \RuntimeException('Archive check failed on '.$child['source'].': '.$copiedRows.' rows copied, '.$lockedRows.' expected. The batch was rolled back.');
                     }
+
+                    $cascaded[substr($child['source'], strlen($this->dbPrefix))] = $copiedRows;
                 }
 
                 $copiedRows  = null === $archive ? null : $this->connection->executeQuery($archive['copy'], $params, $types)->rowCount();
@@ -821,6 +951,12 @@ class EventLogCleanup
             return $this->writeBatch($operation, $statements, $range);
         }
 
+        foreach (self::ANONYMOUS_CONTACTS === $operation ? $cascaded : [] as $childTable => $rows) {
+            if ($rows > 0) {
+                $this->cascadeRows[$childTable] = ($this->cascadeRows[$childTable] ?? 0) + $rows;
+            }
+        }
+
         return $writtenRows;
     }
 
@@ -839,6 +975,134 @@ class EventLogCleanup
     private function archiveTableName(string $name): string
     {
         return $this->dbPrefix.self::ARCHIVE_PREFIX.$name;
+    }
+
+    /**
+     * Adds the conditions of the anonymous contacts cleanup that come from the database.
+     * Every unique identifier field, email included, must be empty, so a contact that has any value that could identify it stays, even one of only spaces.
+     * No table whose foreign key to leads does not cascade may point at the contact, so a contact with a page hit, a send or a form submission stays.
+     * Those tables are kept, so each batch can check them again.
+     * Rejects an identifier field with no column in leads, and a foreign key that does not come through one column on the contact's id.
+     * Rejects a foreign key from leads to itself, because MySQL cannot delete from a table that the same statement reads.
+     * Reads the foreign keys of every table the contact cascade reaches, so a key there from another database or from leads stops the run as well.
+     */
+    private function prepareAnonymousContacts(): void
+    {
+        $table   = $this->dbPrefix.self::ANONYMOUS_CONTACTS;
+        $column  = self::PREFIX.self::ANONYMOUS_CONTACTS.'.';
+        $columns = $this->connection->executeQuery(
+            'SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :table',
+            ['table' => $table],
+            ['table' => \PDO::PARAM_STR]
+        )->fetchFirstColumn();
+        $fields = $this->connection->executeQuery(
+            'SELECT alias FROM '.$this->dbPrefix."lead_fields WHERE object = 'lead' AND is_unique_identifer = 1",
+            [],
+            []
+        )->fetchFirstColumn();
+
+        foreach (array_unique(['email', ...array_map(strval(...), $fields)]) as $field) {
+            if (1 !== preg_match(self::IP_PLAIN_NAME, $field) || !in_array($field, $columns, true)) {
+                throw new \RuntimeException('Cannot tell anonymous contacts apart, because the identifier field '.$field.' has no column in '.$table.'.');
+            }
+
+            $this->queriesTemplate[self::ANONYMOUS_CONTACTS] .= ' AND ('.$column.$field.' IS NULL OR OCTET_LENGTH(CAST('.$column.$field.' AS CHAR)) = 0)';
+        }
+
+        $cascades = [];
+
+        foreach ($this->readForeignKeys($table) as $key) {
+            if ($table === $key['child_table']) {
+                throw new \RuntimeException('Cannot delete anonymous contacts, because '.$table.' points at itself through '.$key['child_column'].'.');
+            }
+
+            if ('CASCADE' === $key['delete_rule']) {
+                $cascades[] = $key['child_table'];
+
+                continue;
+            }
+
+            if ('id' !== $key['referenced_column']) {
+                throw new \RuntimeException('Cannot delete anonymous contacts, because '.$key['child_table'].' points at '.$table.' through '.$key['referenced_column'].', not its id.');
+            }
+
+            $this->contactGuards[] = ['table' => $key['child_table'], 'column' => $key['child_column']];
+            $this->queriesTemplate[self::ANONYMOUS_CONTACTS] .= ' AND NOT EXISTS (SELECT 1 FROM '.$key['child_table'].' WHERE '.$key['child_table'].'.'.$key['child_column'].' = '.$column.'id)';
+        }
+
+        $seen = [$table => true];
+
+        foreach ($cascades as $child) {
+            $this->readCascadeKeys($child, $seen);
+        }
+    }
+
+    /**
+     * Reads the foreign keys of a table that the contact cascade reaches, then of every table its own cascade reaches, each table once.
+     * A key from another database stops the run there, before anything is written, because the cascade would change rows this run cannot see.
+     * A key from leads stops it too, because the delete would then remove, change or stop on contacts that are not anonymous.
+     *
+     * @param string              $table the table the cascade reaches, with its prefix
+     * @param array<string, bool> $seen  the tables already read, each with its prefix
+     */
+    private function readCascadeKeys(string $table, array &$seen): void
+    {
+        if (isset($seen[$table])) {
+            return;
+        }
+
+        $seen[$table] = true;
+        $contacts     = $this->dbPrefix.self::ANONYMOUS_CONTACTS;
+
+        foreach ($this->readForeignKeys($table) as $key) {
+            if ($contacts === $key['child_table']) {
+                throw new \RuntimeException('Cannot delete anonymous contacts, because '.$contacts.' points at '.$table.', which the contact cascade reaches, through '.$key['child_column'].'.');
+            }
+
+            if ('CASCADE' === $key['delete_rule']) {
+                $this->readCascadeKeys($key['child_table'], $seen);
+            }
+        }
+    }
+
+    /**
+     * Counts, on a dry run, the rows that the cascade would remove with the anonymous contacts, for each child table that has some.
+     * It also counts, for each table one level further down, the rows that point at those child rows, each row once.
+     * A run with the archive stops on such a row, and a run without it removes or changes it, or stops where its key blocks the delete.
+     */
+    private function countContactCascades(): void
+    {
+        $contacts   = 'SELECT '.$this->dbPrefix.self::ANONYMOUS_CONTACTS.'.id FROM '.str_replace(self::PREFIX, $this->dbPrefix, $this->queriesTemplate[self::ANONYMOUS_CONTACTS]);
+        $conditions = [];
+
+        foreach ($this->findCascadeChildren($this->dbPrefix.self::ANONYMOUS_CONTACTS, true) as $child => $childColumn) {
+            $childRows = $child.' WHERE '.$child.'.'.$childColumn.' IN ('.$contacts.')';
+            $rows      = (int) $this->connection->executeQuery(
+                'SELECT COUNT(*) FROM '.$childRows,
+                $this->params[self::ANONYMOUS_CONTACTS],
+                $this->types[self::ANONYMOUS_CONTACTS]
+            )->fetchOne();
+
+            if ($rows > 0) {
+                $this->cascadeRows[substr($child, strlen($this->dbPrefix))] = $rows;
+            }
+
+            foreach ($this->readForeignKeys($child) as $key) {
+                $conditions[$key['child_table']][] = $key['child_table'].'.'.$key['child_column'].' IN (SELECT '.$child.'.'.$key['referenced_column'].' FROM '.$childRows.')';
+            }
+        }
+
+        foreach ($conditions as $below => $pointers) {
+            $rows = (int) $this->connection->executeQuery(
+                'SELECT COUNT(*) FROM '.$below.' WHERE '.implode(' OR ', $pointers),
+                $this->params[self::ANONYMOUS_CONTACTS],
+                $this->types[self::ANONYMOUS_CONTACTS]
+            )->fetchOne();
+
+            if ($rows > 0) {
+                $this->belowRows[substr($below, strlen($this->dbPrefix))] = $rows;
+            }
+        }
     }
 
     /**
