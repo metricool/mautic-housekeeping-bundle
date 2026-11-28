@@ -1082,20 +1082,64 @@ final class EventLogCleanupTest extends TestCase
             [self::IDENTIFIER_FIELDS_SQL, [], [], []],
             [self::KEYS_SQL, ['table' => 'prefix_table_leads'], $keysTypes, [
                 ['child_table' => 'prefix_table_lead_notes', 'child_column' => 'lead_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
+                ['child_table' => 'prefix_table_lead_tags', 'child_column' => 'lead_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
             ]],
             [self::KEYS_SQL, ['table' => 'prefix_table_lead_notes'], $keysTypes, [
-                ['child_table' => 'prefix_table_leads', 'child_column' => 'note_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
                 ['child_table' => 'prefix_table_note_tags', 'child_column' => 'note_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
             ]],
-            [self::KEYS_SQL, ['table' => 'prefix_table_note_tags'], $keysTypes, [
-                ['child_table' => 'note_audit', 'child_column' => 'tag_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '0'],
+            [self::KEYS_SQL, ['table' => 'prefix_table_note_tags'], $keysTypes, []],
+            [self::KEYS_SQL, ['table' => 'prefix_table_lead_tags'], $keysTypes, [
+                ['child_table' => 'prefix_table_note_tags', 'child_column' => 'tag_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
+                ['child_table' => 'prefix_table_tag_votes', 'child_column' => 'tag_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
+            ]],
+            [self::KEYS_SQL, ['table' => 'prefix_table_tag_votes'], $keysTypes, [
+                ['child_table' => 'vote_audit', 'child_column' => 'vote_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '0'],
             ]],
         ], 0, 0, 0);
 
         $this->expectException(\RuntimeException::class);
-        $this->expectExceptionMessage('Cannot work on prefix_table_note_tags, because note_audit in another database points at it.');
+        $this->expectExceptionMessage('Cannot work on prefix_table_tag_votes, because vote_audit in another database points at it.');
 
         $this->createEventLogCleanup($connection)->deleteEventLogEntries(30, null, false, [EventLogCleanup::ANONYMOUS_CONTACTS => true], $this->createStub(OutputInterface::class), null, 2);
+    }
+
+    /**
+     * Rejects a key from leads to a table that the contact cascade reaches, before anything is written, because the delete would then remove, change or stop on contacts that are not anonymous.
+     *
+     * @dataProvider cascadeBackProvider
+     *
+     * @param string $deleteRule what a delete in the reached table does to the contacts that point at it
+     */
+    public function testAnonymousContactsRejectAKeyFromLeadsIntoTheCascade(string $deleteRule): void
+    {
+        $keysTypes  = ['table' => \PDO::PARAM_STR];
+        $connection = $this->createArchiveConnection([
+            [self::CONTACT_COLUMNS_SQL, ['table' => 'prefix_table_leads'], $keysTypes, ['id', 'email', 'note_id']],
+            [self::IDENTIFIER_FIELDS_SQL, [], [], []],
+            [self::KEYS_SQL, ['table' => 'prefix_table_leads'], $keysTypes, [
+                ['child_table' => 'prefix_table_lead_notes', 'child_column' => 'lead_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
+            ]],
+            [self::KEYS_SQL, ['table' => 'prefix_table_lead_notes'], $keysTypes, [
+                ['child_table' => 'prefix_table_leads', 'child_column' => 'note_id', 'referenced_column' => 'id', 'delete_rule' => $deleteRule, 'same_schema' => '1'],
+            ]],
+        ], 0, 0, 0);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Cannot delete anonymous contacts, because prefix_table_leads points at prefix_table_lead_notes, which the contact cascade reaches, through note_id.');
+
+        $this->createEventLogCleanup($connection)->deleteEventLogEntries(30, null, false, [EventLogCleanup::ANONYMOUS_CONTACTS => true], $this->createStub(OutputInterface::class), null, 2);
+    }
+
+    /**
+     * Returns the delete rules a key from leads to a table of the contact cascade can have.
+     *
+     * @return \Generator<string, array{string}>
+     */
+    public static function cascadeBackProvider(): \Generator
+    {
+        yield 'cascading' => ['CASCADE'];
+        yield 'set to NULL' => ['SET NULL'];
+        yield 'restricting' => ['RESTRICT'];
     }
 
     /**

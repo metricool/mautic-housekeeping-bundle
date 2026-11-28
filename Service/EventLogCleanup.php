@@ -984,7 +984,7 @@ class EventLogCleanup
      * Those tables are kept, so each batch can check them again.
      * Rejects an identifier field with no column in leads, and a foreign key that does not come through one column on the contact's id.
      * Rejects a foreign key from leads to itself, because MySQL cannot delete from a table that the same statement reads.
-     * Reads the foreign keys of every table the contact cascade reaches, so a key from another database there stops the run as well.
+     * Reads the foreign keys of every table the contact cascade reaches, so a key there from another database or from leads stops the run as well.
      */
     private function prepareAnonymousContacts(): void
     {
@@ -1040,6 +1040,7 @@ class EventLogCleanup
     /**
      * Reads the foreign keys of a table that the contact cascade reaches, then of every table its own cascade reaches, each table once.
      * A key from another database stops the run there, before anything is written, because the cascade would change rows this run cannot see.
+     * A key from leads stops it too, because the delete would then remove, change or stop on contacts that are not anonymous.
      *
      * @param string              $table the table the cascade reaches, with its prefix
      * @param array<string, bool> $seen  the tables already read, each with its prefix
@@ -1051,8 +1052,13 @@ class EventLogCleanup
         }
 
         $seen[$table] = true;
+        $contacts     = $this->dbPrefix.self::ANONYMOUS_CONTACTS;
 
         foreach ($this->readForeignKeys($table) as $key) {
+            if ($contacts === $key['child_table']) {
+                throw new \RuntimeException('Cannot delete anonymous contacts, because '.$contacts.' points at '.$table.', which the contact cascade reaches, through '.$key['child_column'].'.');
+            }
+
             if ('CASCADE' === $key['delete_rule']) {
                 $this->readCascadeKeys($key['child_table'], $seen);
             }

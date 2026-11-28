@@ -137,6 +137,7 @@ How a run works:
 - `--dry-run` counts the contacts and the rows their cascade would remove from each table. It also counts the rows one level further down that point at those rows. A run with `--archive` stops on them, and a run without it removes or changes them, or stops where their key blocks the delete.
 - A foreign key from a table in another database, to `leads` or to any table its cascade reaches, stops the run before it deletes anything.
 - A foreign key from `leads` to itself stops the run before it deletes anything, because MySQL cannot delete from a table that the same statement reads.
+- A foreign key from `leads` to a table its cascade reaches stops the run before it deletes anything, because the delete could then remove or change other contacts through it.
 - Rows in tables with no foreign key, such as `integration_entity`, keep the contact's ID, as with Mautic's own cleanup.
 
 To put contacts back, copy them first, then their rows. `housekeeping_archive_leads` has `generated_email_domain` as a plain column, so leave it out of the column list:
