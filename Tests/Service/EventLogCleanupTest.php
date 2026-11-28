@@ -1072,6 +1072,33 @@ final class EventLogCleanupTest extends TestCase
     }
 
     /**
+     * Rejects, without --archive and before anything is written, a key from another database on a table that the contact cascade reaches two levels down, reading each table once.
+     */
+    public function testAnonymousContactsRejectAKeyFromAnotherDatabaseBelowTheCascade(): void
+    {
+        $keysTypes  = ['table' => \PDO::PARAM_STR];
+        $connection = $this->createArchiveConnection([
+            [self::CONTACT_COLUMNS_SQL, ['table' => 'prefix_table_leads'], $keysTypes, ['id', 'email']],
+            [self::IDENTIFIER_FIELDS_SQL, [], [], []],
+            [self::KEYS_SQL, ['table' => 'prefix_table_leads'], $keysTypes, [
+                ['child_table' => 'prefix_table_lead_notes', 'child_column' => 'lead_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
+            ]],
+            [self::KEYS_SQL, ['table' => 'prefix_table_lead_notes'], $keysTypes, [
+                ['child_table' => 'prefix_table_leads', 'child_column' => 'note_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
+                ['child_table' => 'prefix_table_note_tags', 'child_column' => 'note_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '1'],
+            ]],
+            [self::KEYS_SQL, ['table' => 'prefix_table_note_tags'], $keysTypes, [
+                ['child_table' => 'note_audit', 'child_column' => 'tag_id', 'referenced_column' => 'id', 'delete_rule' => 'CASCADE', 'same_schema' => '0'],
+            ]],
+        ], 0, 0, 0);
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage('Cannot work on prefix_table_note_tags, because note_audit in another database points at it.');
+
+        $this->createEventLogCleanup($connection)->deleteEventLogEntries(30, null, false, [EventLogCleanup::ANONYMOUS_CONTACTS => true], $this->createStub(OutputInterface::class), null, 2);
+    }
+
+    /**
      * Returns a connection that expects these queries in this order and answers each with the value given for it.
      *
      * @param list<array{0: string, 1: array<string, mixed>, 2: array<string, int>, 3: mixed}> $calls
